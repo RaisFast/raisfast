@@ -13,6 +13,7 @@ pub struct PageResponse {
     pub title: String,
     pub slug: String,
     pub content: Option<String>,
+    pub blocks: Option<String>,
     pub status: String,
     pub template: String,
     #[cfg_attr(feature = "export-types", ts(type = "number"))]
@@ -29,6 +30,7 @@ impl PageResponse {
             title: p.title,
             slug: p.slug,
             content: p.content,
+            blocks: p.blocks,
             status: p.status.to_string(),
             template: p.template,
             sort_order: p.sort_order,

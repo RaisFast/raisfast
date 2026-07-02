@@ -4,6 +4,7 @@
 //! create, find, delete operations on the `api_tokens` table. Tokens are stored
 //! as SHA-256 hashes; the plaintext is returned only once at creation time.
 
+use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 #[cfg(feature = "export-types")]
@@ -35,10 +36,24 @@ pub struct ApiTokenListItem {
     pub id: SnowflakeId,
     pub name: String,
     pub token_prefix: String,
+    #[serde(serialize_with = "serialize_scopes_as_array")]
     pub scopes: String,
     pub last_used_at: Option<Timestamp>,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
+}
+
+/// Custom serializer for `scopes` - parses a JSON string into an array for output
+fn serialize_scopes_as_array<S>(scopes: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let parsed: Vec<String> = serde_json::from_str(scopes).unwrap_or_default();
+    let mut seq = serializer.serialize_seq(Some(parsed.len()))?;
+    for s in &parsed {
+        seq.serialize_element(s)?;
+    }
+    seq.end()
 }
 
 /// Create a new API Token record
