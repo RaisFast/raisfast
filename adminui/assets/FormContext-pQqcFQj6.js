@@ -1,0 +1,1 @@
+import{f as t}from"./vendor-react-j_G0Dyx0.js";import{ai as r}from"./index-DwmPvwsm.js";const e=t.createContext({formRef:{current:{fields:new Map}},errors:{},clearErrors:r,validationMode:"onSubmit",submitAttemptedRef:{current:!1}});function s(){return t.useContext(e)}export{s as u};

@@ -32,8 +32,10 @@ pub const N_SKIPPED: &str = "skipped";
 pub const N_IN_PROGRESS: &str = "in_progress";
 pub const N_WAITING: &str = "waiting";
 pub const N_FAILED: &str = "failed";
+pub const N_ERROR_OUTPUT: &str = "error_output";
 
-/// One node's per-attempt result (idempotency: success/skipped never re-run).
+/// One node's per-attempt result (idempotency: success/skipped/error_output
+/// never re-run).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeState {
     pub status: String,
@@ -41,10 +43,15 @@ pub struct NodeState {
     pub input: Option<Value>,
     #[serde(default)]
     pub output: Option<Value>,
-    #[serde(default)]
     pub error: Option<Value>,
     #[serde(default)]
     pub attempt: i64,
+    /// LLM-style usage payload ({"prompt_tokens",...}) for billing; set by the
+    /// executor via `ExecOutcome.usage`.
+    #[serde(default)]
+    pub usage: Option<Value>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
 }
 
 /// `modifiers.retry` config.
@@ -58,13 +65,20 @@ pub struct RetryModifier {
 }
 
 /// Orthogonal node modifiers (contracts C1.4). Retry is attempted in-process;
-/// `continue_on_error` fails the node but lets the run pass through.
+/// `continue_on_error` fails the node but lets the run pass through;
+/// `on_error_strategy` converts the failure instead (llm-node.md §5):
+/// `fail` (default) | `default_value` (write `default_outputs`, take out
+/// edges) | `error_output` (write `{"error"}`, take error_out edges).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct NodeModifiers {
     #[serde(default)]
     pub retry: Option<RetryModifier>,
     #[serde(default)]
     pub continue_on_error: bool,
+    #[serde(default)]
+    pub on_error_strategy: Option<String>,
+    #[serde(default)]
+    pub default_outputs: Option<Value>,
 }
 
 /// Edge verdict for readiness (join = all decided; skip = all skipped).
@@ -126,8 +140,7 @@ pub fn resume_snapshot(snap: &mut Snapshot, payload: Option<Value>) -> AppResult
     st.output = Some(payload.clone());
     st.attempt += 1;
     let ns = snap.pool.entry(node.clone()).or_default();
-    ns.insert("resume".to_string(), payload.clone());
-    ns.insert("output".to_string(), payload);
+    ns.insert("resume".to_string(), payload);
     snap.status = S_RUNNING.to_string();
     Ok(())
 }
@@ -136,12 +149,18 @@ pub fn resume_snapshot(snap: &mut Snapshot, payload: Option<Value>) -> AppResult
 #[derive(Debug)]
 pub struct ExecOutcome {
     pub output: Value,
+    /// Billing usage (llm tokens); persisted to `NodeState.usage` →
+    /// `flow_node_run.usage_json`.
+    pub usage: Option<Value>,
+    pub latency_ms: Option<i64>,
 }
 
-/// Async executor for action nodes (`script`/`egress`). Wired in P1.5/1.6.
+/// Async executor for action nodes (`script`/`egress`/`llm`). The variable
+/// pool is passed for template-driven nodes (`llm` reads `{{#…#}}` refs
+/// directly instead of a mapped input).
 #[async_trait]
 pub trait NodeExecutor: Send + Sync {
-    async fn exec(&self, node: &GraphNode, input: Value) -> AppResult<ExecOutcome>;
+    async fn exec(&self, node: &GraphNode, input: Value, pool: &Pool) -> AppResult<ExecOutcome>;
 }
 
 /// Durability hook: persist the snapshot after each claim / node completion.
@@ -201,6 +220,25 @@ pub async fn run_persisted(
             skip_node(graph, snap, &id, &mut queue)?;
             continue;
         }
+        // error_output nodes are decided (llm-node.md §5.2 / H1): re-running
+        // would double-bill LLM calls after an await-resume.
+        if let Some(st) = snap.node_states.get(&id)
+            && st.status == N_ERROR_OUTPUT
+        {
+            resume_error_output(graph, snap, &id, &mut queue)?;
+            continue;
+        }
+        // Stock-bug sibling of H1: `continue_on_error`-failed nodes already
+        // fanned out in a prior pass — replay the fan-out, never re-exec.
+        if let Some(st) = snap.node_states.get(&id)
+            && st.status == N_FAILED
+            && serde_json::from_value::<NodeModifiers>(node.data.modifiers.clone())
+                .unwrap_or_default()
+                .continue_on_error
+        {
+            fan_out_after_run(graph, snap, &id, &mut queue)?;
+            continue;
+        }
 
         snap.exec_order.push(id.clone());
 
@@ -227,7 +265,7 @@ pub async fn run_persisted(
                 mark_node_success(snap, &id, json!({"handle": handle}));
                 fan_out_after_branch(graph, snap, &id, Some(handle.as_str()), &mut queue)?;
             }
-            nodes::T_SCRIPT | nodes::T_EGRESS => {
+            nodes::T_SCRIPT | nodes::T_EGRESS | nodes::T_LLM => {
                 let mods: NodeModifiers =
                     serde_json::from_value(node.data.modifiers.clone()).unwrap_or_default();
                 let attempts = mods
@@ -239,29 +277,35 @@ pub async fn run_persisted(
                 // Directly after `start` with no explicit `input` mapping: pass
                 // the caller's trigger inputs through by default, so external /
                 // manual runs reach the first script without extra wiring.
-                let has_explicit_input = node.data.config.get("input").is_some();
-                let fed_by_start_only = graph
-                    .in_edges
-                    .get(&id)
-                    .map(|idx| {
-                        !idx.is_empty()
-                            && idx.iter().all(|&ei| graph.edges[ei].source == graph.start)
-                    })
-                    .unwrap_or(false);
-                let input = if !has_explicit_input && fed_by_start_only {
-                    let mut m = serde_json::Map::new();
-                    if let Some(ns) = snap.pool.get(&graph.start) {
-                        for (k, v) in ns {
-                            m.insert(k.clone(), v.clone());
-                        }
-                    }
-                    Value::Object(m)
+                // `llm` reads variables through message templates instead and
+                // ignores the fed input (llm-node.md W5) — feed it nothing.
+                let input = if node.data.kind == nodes::T_LLM {
+                    Value::Object(serde_json::Map::new())
                 } else {
-                    match resolve_inputs(&node.data.config, &snap.pool) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            fail(snap, &id, e.to_string());
-                            continue;
+                    let has_explicit_input = node.data.config.get("input").is_some();
+                    let fed_by_start_only = graph
+                        .in_edges
+                        .get(&id)
+                        .map(|idx| {
+                            !idx.is_empty()
+                                && idx.iter().all(|&ei| graph.edges[ei].source == graph.start)
+                        })
+                        .unwrap_or(false);
+                    if !has_explicit_input && fed_by_start_only {
+                        let mut m = serde_json::Map::new();
+                        if let Some(ns) = snap.pool.get(&graph.start) {
+                            for (k, v) in ns {
+                                m.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Value::Object(m)
+                    } else {
+                        match resolve_inputs(&node.data.config, &snap.pool) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                fail(snap, &id, e.to_string());
+                                continue;
+                            }
                         }
                     }
                 };
@@ -273,32 +317,71 @@ pub async fn run_persisted(
                     // re-runs at-least-once from this claim (A.3).
                     set_in_progress(snap, &id, i);
                     persist.persist(snap).await?;
-                    match exec.exec(node, input.clone()).await {
+                    match exec.exec(node, input.clone(), &snap.pool).await {
                         Ok(o) => {
                             outcome = Some(o);
                             break;
                         }
                         Err(e) => {
                             last_error = Some(e.to_string());
+                            // Config/authoring errors (400) fail fast: the
+                            // engine retry is otherwise blind (llm-node.md §4.4).
+                            if matches!(e, AppError::BadRequest(_)) {
+                                break;
+                            }
                         }
                     }
                 }
                 match outcome {
                     Some(o) => {
                         mark_node_success(snap, &id, o.output);
-                        fan_out_after_run(graph, snap, &id, &mut queue)?;
+                        if let Some(st) = snap.node_states.get_mut(&id) {
+                            st.usage = o.usage;
+                            st.latency_ms = o.latency_ms;
+                        }
+                        fan_out_exec(graph, snap, &id, &mut queue, false)?;
                     }
                     None => {
                         let msg = last_error.unwrap_or_default();
-                        if mods.continue_on_error {
-                            // Fail the node but pass the run through (downstream
-                            // continues; its inputs still resolve upstream).
-                            let st = snap.node_states.entry(id.clone()).or_default();
-                            st.status = N_FAILED.to_string();
-                            st.error = Some(json!({"message": msg}));
-                            fan_out_after_run(graph, snap, &id, &mut queue)?;
-                        } else {
-                            fail(snap, &id, msg);
+                        let strategy = mods.on_error_strategy.as_deref().unwrap_or("fail");
+                        match strategy {
+                            "error_output" => {
+                                let out = json!({"error": msg});
+                                let st = snap.node_states.entry(id.clone()).or_default();
+                                st.status = N_ERROR_OUTPUT.to_string();
+                                st.error = Some(json!({"message": msg}));
+                                st.output = Some(out.clone());
+                                snap.pool
+                                    .entry(id.clone())
+                                    .or_default()
+                                    .insert("output".to_string(), out);
+                                fan_out_exec(graph, snap, &id, &mut queue, true)?;
+                            }
+                            "default_value" => {
+                                let out = mods.default_outputs.clone().unwrap_or(Value::Null);
+                                let st = snap.node_states.entry(id.clone()).or_default();
+                                st.status = N_ERROR_OUTPUT.to_string();
+                                st.error = Some(json!({"message": msg}));
+                                st.output = Some(out.clone());
+                                if out.is_object() || out.is_array() {
+                                    snap.pool
+                                        .entry(id.clone())
+                                        .or_default()
+                                        .insert("output".to_string(), out);
+                                }
+                                fan_out_exec(graph, snap, &id, &mut queue, false)?;
+                            }
+                            _ if mods.continue_on_error => {
+                                // Fail the node but pass the run through (downstream
+                                // continues; its inputs still resolve upstream).
+                                let st = snap.node_states.entry(id.clone()).or_default();
+                                st.status = N_FAILED.to_string();
+                                st.error = Some(json!({"message": msg}));
+                                fan_out_after_run(graph, snap, &id, &mut queue)?;
+                            }
+                            _ => {
+                                fail(snap, &id, msg);
+                            }
                         }
                     }
                 }
@@ -340,11 +423,16 @@ fn mark_node_success(snap: &mut Snapshot, id: &str, output: Value) {
     let st = snap.node_states.entry(id.to_string()).or_default();
     st.status = N_SUCCESS.to_string();
     st.output = Some(output.clone());
-    if output.is_object() || output.is_array() {
-        snap.pool
-            .entry(id.to_string())
-            .or_default()
-            .insert("output".to_string(), output);
+    // v2 D1 flat addressing: an object output's fields become the namespace
+    // directly (`{{#id.field#}}`). Null writes nothing (start keeps its seeded
+    // params); any other non-object lands under the single `value` field.
+    let ns = snap.pool.entry(id.to_string()).or_default();
+    if let Value::Object(map) = output {
+        for (k, v) in map {
+            ns.insert(k, v);
+        }
+    } else if !output.is_null() {
+        ns.insert("value".to_string(), output);
     }
 }
 
@@ -376,6 +464,44 @@ fn fan_out_after_run(
     };
     for &ei in idx {
         mark(graph, snap, ei, EdgeMark::Taken);
+    }
+    for &ei in idx {
+        consider_target(graph, snap, &graph.edges[ei].target, queue)?;
+    }
+    Ok(())
+}
+
+/// EXEC-node fan-out by verdict (llm-node.md §5.2): success → every non-
+/// `error_out` edge is taken (error branch skipped); error_output → only the
+/// `error_out` edges are taken. Without `error_out` edges this equals
+/// [`fan_out_after_run`].
+fn fan_out_exec(
+    graph: &Graph,
+    snap: &mut Snapshot,
+    id: &str,
+    queue: &mut VecDeque<String>,
+    error_path: bool,
+) -> AppResult<()> {
+    let Some(idx) = graph.out_edges.get(id) else {
+        return Ok(());
+    };
+    for &ei in idx {
+        let is_err_edge = graph.edges[ei].source_handle == super::nodes::H_ERROR_OUT;
+        let taken = if error_path {
+            is_err_edge
+        } else {
+            !is_err_edge
+        };
+        mark(
+            graph,
+            snap,
+            ei,
+            if taken {
+                EdgeMark::Taken
+            } else {
+                EdgeMark::Skipped
+            },
+        );
     }
     for &ei in idx {
         consider_target(graph, snap, &graph.edges[ei].target, queue)?;
@@ -459,8 +585,23 @@ fn skip_node(
     id: &str,
     queue: &mut VecDeque<String>,
 ) -> AppResult<()> {
-    let st = snap.node_states.entry(id.to_string()).or_default();
-    st.status = N_SKIPPED.to_string();
+    let declared = graph
+        .nodes
+        .get(id)
+        .map(|n| nodes::declared_output_fields(&n.data.kind, &n.data.config))
+        .unwrap_or_default();
+    {
+        let st = snap.node_states.entry(id.to_string()).or_default();
+        st.status = N_SKIPPED.to_string();
+    }
+    // v2 D6 skip-nulls: downstream refs to a skipped node resolve to explicit
+    // nulls instead of 400-ing — the reference laws stay closed at runtime.
+    if !declared.is_empty() {
+        let ns = snap.pool.entry(id.to_string()).or_default();
+        for field in declared {
+            ns.entry(field).or_insert(Value::Null);
+        }
+    }
     let Some(idx) = graph.out_edges.get(id) else {
         return Ok(());
     };
@@ -495,11 +636,34 @@ fn resume_completed(
             fan_out_after_branch(graph, snap, id, handle.as_deref(), queue)?;
         }
         nodes::T_END => {}
+        nodes::T_SCRIPT | nodes::T_EGRESS | nodes::T_LLM => {
+            // Same verdict fan-out as the live path: a succeeded exec node
+            // skips its error_out edges (they were Skipped in the prior pass).
+            fan_out_exec(graph, snap, id, queue, false)?;
+        }
         _ => {
             fan_out_after_run(graph, snap, id, queue)?;
         }
     }
     Ok(())
+}
+
+/// Replay fan-out for an `error_output`-decided node on resume (H1 fix):
+/// never re-exec (would double-bill LLM calls); re-route by the node's
+/// declared strategy — `error_output` → error_out edges, else normal out.
+fn resume_error_output(
+    graph: &Graph,
+    snap: &mut Snapshot,
+    id: &str,
+    queue: &mut VecDeque<String>,
+) -> AppResult<()> {
+    let is_error_branch = graph
+        .nodes
+        .get(id)
+        .and_then(|n| n.data.modifiers.get("on_error_strategy"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| s == "error_output");
+    fan_out_exec(graph, snap, id, queue, is_error_branch)
 }
 
 // ── value resolution (literal/ref; expr → P1.7) ──────────────────────────
@@ -518,8 +682,17 @@ fn resolve(raw: &Value, pool: &Pool) -> AppResult<Value> {
 }
 
 fn resolve_ref(sel: &[Value], pool: &Pool) -> AppResult<Value> {
-    if sel.len() < 2 {
-        return Err(AppError::BadRequest("ref 需至少 [namespace, name]".into()));
+    // v2 D7: single-segment `[ns]` = whole namespace object.
+    if sel.len() == 1 {
+        let ns = sel[0].as_str().unwrap_or_default();
+        let m = pool
+            .get(ns)
+            .ok_or_else(|| AppError::BadRequest(format!("ref 引用不存在: {ns}")))?;
+        let map: serde_json::Map<String, Value> = m.clone().into_iter().collect();
+        return Ok(Value::Object(map));
+    }
+    if sel.is_empty() {
+        return Err(AppError::BadRequest("ref 不能为空".into()));
     }
     let ns = sel[0].as_str().unwrap_or_default();
     let name = sel[1].as_str().unwrap_or_default();
@@ -555,7 +728,7 @@ fn resolve_end_outputs(node: &GraphNode, snap: &Snapshot) -> AppResult<Value> {
         .map_err(|e| AppError::BadRequest(format!("end config: {e}")))?;
     let mut out = serde_json::Map::new();
     for o in &cfg.outputs {
-        out.insert(o.name.clone(), resolve(&o.value, &snap.pool)?);
+        out.insert(o.key.clone(), resolve(&o.value, &snap.pool)?);
     }
     Ok(Value::Object(out))
 }
@@ -645,9 +818,16 @@ mod tests {
     struct StubExec;
     #[async_trait]
     impl NodeExecutor for StubExec {
-        async fn exec(&self, _node: &GraphNode, _input: Value) -> AppResult<ExecOutcome> {
+        async fn exec(
+            &self,
+            _node: &GraphNode,
+            _input: Value,
+            _pool: &Pool,
+        ) -> AppResult<ExecOutcome> {
             Ok(ExecOutcome {
                 output: json!({"stub": true}),
+                usage: None,
+                latency_ms: None,
             })
         }
     }
@@ -659,13 +839,21 @@ mod tests {
     }
     #[async_trait]
     impl NodeExecutor for FlakyExec {
-        async fn exec(&self, _node: &GraphNode, _input: Value) -> AppResult<ExecOutcome> {
+        async fn exec(
+            &self,
+            _node: &GraphNode,
+            _input: Value,
+            _pool: &Pool,
+        ) -> AppResult<ExecOutcome> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_until {
-                Err(AppError::BadRequest("flaky boom".into()))
+                // Internal (retryable): BadRequest now short-circuits retries.
+                Err(AppError::Internal(anyhow::anyhow!("flaky boom")))
             } else {
                 Ok(ExecOutcome {
                     output: json!({"stub": true}),
+                    usage: None,
+                    latency_ms: None,
                 })
             }
         }
@@ -693,7 +881,7 @@ mod tests {
                 node(
                     "end",
                     "end",
-                    json!({"outputs": [{"name": "answer", "value": {"ref": ["start", "msg"]}}]})
+                    json!({"outputs": [{"key": "answer", "value": {"ref": ["start", "msg"]}}]})
                 )
             ]),
             json!([edge("start", "out", "end")]),
@@ -782,7 +970,7 @@ mod tests {
                 node(
                     "end",
                     "end",
-                    json!({"outputs": [{"name": "v", "value": {"ref": ["e2", "output"]}}]})
+                    json!({"outputs": [{"key": "v", "value": {"ref": ["e2"]}}]})
                 )
             ]),
             json!([
@@ -863,6 +1051,307 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_output_routes_error_branch() {
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node_m(
+                    "e1",
+                    "egress",
+                    json!({"client_key": "k", "op": "o"}),
+                    json!({"on_error_strategy": "error_output"})
+                ),
+                node("ok_end", "end", json!({"outputs": []})),
+                node("err_end", "end", json!({"outputs": []}))
+            ]),
+            json!([
+                edge("start", "out", "e1"),
+                edge("e1", "out", "ok_end"),
+                edge("e1", "error_out", "err_end")
+            ]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        let always_fail = FlakyExec {
+            calls: Default::default(),
+            fail_until: usize::MAX,
+        };
+        run(&g, &mut snap, &always_fail).await.unwrap();
+        assert_eq!(snap.status, S_SUCCESS, "error_output 不终止 run");
+        assert_eq!(snap.node_states["e1"].status, N_ERROR_OUTPUT);
+        assert_eq!(snap.node_states["ok_end"].status, N_SKIPPED);
+        assert_eq!(snap.node_states["err_end"].status, N_SUCCESS);
+        assert!(snap.pool["e1"]["output"]["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn default_value_fabricates_output() {
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node_m(
+                    "e1",
+                    "egress",
+                    json!({"client_key": "k", "op": "o"}),
+                    json!({
+                        "on_error_strategy": "default_value",
+                        "default_outputs": {"score": 0}
+                    })
+                ),
+                node("end", "end", json!({"outputs": []}))
+            ]),
+            json!([edge("start", "out", "e1"), edge("e1", "out", "end")]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        let always_fail = FlakyExec {
+            calls: Default::default(),
+            fail_until: usize::MAX,
+        };
+        run(&g, &mut snap, &always_fail).await.unwrap();
+        assert_eq!(snap.status, S_SUCCESS);
+        assert_eq!(snap.node_states["e1"].status, N_ERROR_OUTPUT);
+        assert_eq!(snap.pool["e1"]["output"]["score"], 0);
+        assert_eq!(snap.node_states["end"].status, N_SUCCESS);
+    }
+
+    #[tokio::test]
+    async fn bad_request_fails_fast_without_retry_burn() {
+        struct BadReqExec {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl NodeExecutor for BadReqExec {
+            async fn exec(
+                &self,
+                _node: &GraphNode,
+                _input: Value,
+                _pool: &Pool,
+            ) -> AppResult<ExecOutcome> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(AppError::BadRequest("config bad".into()))
+            }
+        }
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node_m(
+                    "e1",
+                    "egress",
+                    json!({"client_key": "k", "op": "o"}),
+                    json!({"retry": {"attempts": 3}})
+                ),
+                node("end", "end", json!({"outputs": []}))
+            ]),
+            json!([edge("start", "out", "e1"), edge("e1", "out", "end")]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        let exec = BadReqExec {
+            calls: Default::default(),
+        };
+        run(&g, &mut snap, &exec).await.unwrap();
+        assert_eq!(snap.status, S_FAILED);
+        assert_eq!(
+            exec.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "BadRequest 短路：不烧 attempts"
+        );
+        assert_eq!(snap.node_states["e1"].attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn error_output_node_not_rerun_on_resume() {
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node_m(
+                    "e1",
+                    "egress",
+                    json!({"client_key": "k", "op": "o"}),
+                    json!({"on_error_strategy": "error_output"})
+                ),
+                node("gate", "await", json!({"kind": "human"})),
+                node("end", "end", json!({"outputs": []}))
+            ]),
+            json!([
+                edge("start", "out", "e1"),
+                edge("e1", "error_out", "gate"),
+                edge("gate", "out", "end")
+            ]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        let always_fail = FlakyExec {
+            calls: Default::default(),
+            fail_until: usize::MAX,
+        };
+        run(&g, &mut snap, &always_fail).await.unwrap();
+        assert_eq!(snap.status, S_WAITING);
+        assert_eq!(snap.node_states["e1"].status, N_ERROR_OUTPUT);
+        let calls_after_first = always_fail.calls.load(std::sync::atomic::Ordering::SeqCst);
+
+        resume_snapshot(&mut snap, Some(json!({"approved": true}))).unwrap();
+        run(&g, &mut snap, &always_fail).await.unwrap();
+        assert_eq!(snap.status, S_SUCCESS);
+        assert_eq!(
+            always_fail.calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls_after_first,
+            "resume 不重跑 error_output 节点（H1：避免二次计费）"
+        );
+        assert_eq!(snap.node_states["end"].status, N_SUCCESS);
+    }
+
+    #[tokio::test]
+    async fn flat_addressing_downstream_ref() {
+        // v2 D1: object output fields are the namespace directly — no `output` segment.
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node("s1", "script", json!({"language": "js", "code": "1"})),
+                node(
+                    "end",
+                    "end",
+                    json!({"outputs": [{"key": "v", "value": {"ref": ["s1", "stub"]}}]})
+                )
+            ]),
+            json!([edge("start", "out", "s1"), edge("s1", "out", "end")]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        run(&g, &mut snap, &StubExec).await.unwrap();
+        assert_eq!(snap.status, S_SUCCESS);
+        assert_eq!(
+            snap.outputs.unwrap()["v"],
+            json!(true),
+            "字段引用直接取值（平铺无壳）"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_segment_ref_returns_whole_namespace() {
+        // v2 D7: [ns] alone resolves to the whole field map.
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node("e1", "egress", json!({"client_key": "k", "op": "o"})),
+                node(
+                    "end",
+                    "end",
+                    json!({"outputs": [{"key": "all", "value": {"ref": ["e1"]}}]})
+                )
+            ]),
+            json!([edge("start", "out", "e1"), edge("e1", "out", "end")]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        run(&g, &mut snap, &StubExec).await.unwrap();
+        assert_eq!(snap.status, S_SUCCESS);
+        assert_eq!(snap.outputs.unwrap()["all"], json!({"stub": true}));
+    }
+
+    #[tokio::test]
+    async fn skipped_node_declared_fields_resolve_null() {
+        // v2 D6: branch not taken → skipped node's declared fields are null,
+        // downstream refs resolve (null) instead of 400.
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node(
+                    "br",
+                    "branch",
+                    json!({
+                        "branches": [{"handle": "yes", "when": {"op": "==", "var": {"ref": ["start", "go"]}, "value": true}}],
+                        "else_handle": "no"
+                    })
+                ),
+                node("e1", "egress", json!({"client_key": "k", "op": "o"})),
+                node(
+                    "end",
+                    "end",
+                    json!({"outputs": [{"key": "v", "value": {"ref": ["e1", "response"]}}]})
+                )
+            ]),
+            json!([
+                edge("start", "out", "br"),
+                edge("br", "yes", "e1"),
+                edge("e1", "out", "end"),
+                edge("br", "no", "end")
+            ]),
+        ));
+        let mut snap = Snapshot::new();
+        let mut si = HashMap::new();
+        si.insert("go".into(), json!(false));
+        snap.pool.insert("start".into(), si);
+        run(&g, &mut snap, &StubExec).await.unwrap();
+        assert_eq!(snap.status, S_SUCCESS);
+        assert_eq!(snap.node_states["e1"].status, N_SKIPPED);
+        assert_eq!(
+            snap.outputs.unwrap()["v"],
+            Value::Null,
+            "跳过节点的声明字段解析为 null"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_and_latency_ride_node_state() {
+        struct UsageExec;
+        #[async_trait]
+        impl NodeExecutor for UsageExec {
+            async fn exec(
+                &self,
+                _node: &GraphNode,
+                _input: Value,
+                _pool: &Pool,
+            ) -> AppResult<ExecOutcome> {
+                Ok(ExecOutcome {
+                    output: json!({"text": "hi"}),
+                    usage: Some(json!({"total_tokens": 42})),
+                    latency_ms: Some(7),
+                })
+            }
+        }
+        let g = graph_of(def(
+            json!([
+                node("start", "start", json!({})),
+                node("e1", "egress", json!({"client_key": "k", "op": "o"})),
+                node("end", "end", json!({"outputs": []}))
+            ]),
+            json!([edge("start", "out", "e1"), edge("e1", "out", "end")]),
+        ));
+        let mut snap = Snapshot::new();
+        snap.pool.insert("start".into(), HashMap::new());
+        run(&g, &mut snap, &UsageExec).await.unwrap();
+        assert_eq!(
+            snap.node_states["e1"].usage.as_ref().unwrap()["total_tokens"],
+            42
+        );
+        assert_eq!(snap.node_states["e1"].latency_ms, Some(7));
+    }
+
+    #[test]
+    fn error_output_without_edge_rejected_at_publish() {
+        let bad = def(
+            json!([
+                node("start", "start", json!({})),
+                node_m(
+                    "e1",
+                    "egress",
+                    json!({"client_key": "k", "op": "o"}),
+                    json!({"on_error_strategy": "error_output"})
+                ),
+                node("end", "end", json!({"outputs": []}))
+            ]),
+            json!([edge("start", "out", "e1"), edge("e1", "out", "end")]),
+        );
+        let err = match super::super::graph::load_definition(&bad) {
+            Ok(_) => panic!("error_output 无 error_out 边应被发布校验拒绝"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("error_out"), "{err}");
+    }
+
+    #[tokio::test]
     async fn await_parks_then_resume_continues() {
         let g = graph_of(def(
             json!([
@@ -872,7 +1361,7 @@ mod tests {
                     "end",
                     "end",
                     json!({
-                        "outputs": [{"name": "ok", "value": {"ref": ["gate", "resume", "approved"]}}]
+                        "outputs": [{"key": "ok", "value": {"ref": ["gate", "resume", "approved"]}}]
                     })
                 )
             ]),

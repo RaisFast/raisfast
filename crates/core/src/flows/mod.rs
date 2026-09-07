@@ -19,6 +19,8 @@ pub mod exec;
 pub mod expr;
 pub mod graph;
 pub mod handler;
+pub mod lint;
+pub mod llm;
 pub mod model;
 pub mod nodes;
 pub mod params;
@@ -43,6 +45,8 @@ crate::export_types!(
     nodes::BranchRule,
     nodes::BranchConfig,
     nodes::AwaitConfig,
+    nodes::LlmMessage,
+    nodes::LlmConfig,
     nodes::NodeConfigVariant,
     nodes::ValueExpr,
     nodes::NodeKind,

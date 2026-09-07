@@ -15,22 +15,22 @@ use super::nodes::StartParam;
 /// Validate + default `inputs` against the declared start params.
 pub fn apply(params: &[StartParam], inputs: &mut HashMap<String, Value>) -> AppResult<()> {
     for p in params {
-        let present = inputs.contains_key(&p.name);
+        let present = inputs.contains_key(&p.variable);
         if !present {
             match (&p.default, p.required) {
                 (Some(d), _) => {
-                    inputs.insert(p.name.clone(), d.clone());
+                    inputs.insert(p.variable.clone(), d.clone());
                 }
                 (None, true) => {
                     return Err(AppError::BadRequest(format!(
                         "start 入参 '{}' 必填",
-                        p.name
+                        p.variable
                     )));
                 }
                 (None, false) => continue,
             }
         }
-        let v = inputs.get_mut(&p.name).unwrap();
+        let v = inputs.get_mut(&p.variable).unwrap();
         validate_one(p, v)?;
     }
     Ok(())
@@ -38,16 +38,16 @@ pub fn apply(params: &[StartParam], inputs: &mut HashMap<String, Value>) -> AppR
 
 fn validate_one(p: &StartParam, v: &mut Value) -> AppResult<()> {
     match p.kind.as_str() {
-        "text-input" | "paragraph" | "select" => {
+        "text" | "paragraph" | "select" => {
             let s = v
                 .as_str()
-                .ok_or_else(|| AppError::BadRequest(format!("入参 '{}' 需为字符串", p.name)))?;
+                .ok_or_else(|| AppError::BadRequest(format!("入参 '{}' 需为字符串", p.variable)))?;
             if let Some(max) = p.max_length
                 && (s.len() as i64) > max
             {
                 return Err(AppError::BadRequest(format!(
                     "入参 '{}' 超过 max_length={max}",
-                    p.name
+                    p.variable
                 )));
             }
             if p.kind == "select"
@@ -56,7 +56,7 @@ fn validate_one(p: &StartParam, v: &mut Value) -> AppResult<()> {
             {
                 return Err(AppError::BadRequest(format!(
                     "入参 '{}' 不在 options 内",
-                    p.name
+                    p.variable
                 )));
             }
         }
@@ -64,10 +64,13 @@ fn validate_one(p: &StartParam, v: &mut Value) -> AppResult<()> {
             if let Some(s) = v.as_str() {
                 let n = s
                     .parse::<f64>()
-                    .map_err(|_| AppError::BadRequest(format!("入参 '{}' 不是数字", p.name)))?;
+                    .map_err(|_| AppError::BadRequest(format!("入参 '{}' 不是数字", p.variable)))?;
                 *v = serde_json::json!(n);
             } else if !v.is_number() {
-                return Err(AppError::BadRequest(format!("入参 '{}' 需为数字", p.name)));
+                return Err(AppError::BadRequest(format!(
+                    "入参 '{}' 需为数字",
+                    p.variable
+                )));
             }
         }
         "boolean" => {
@@ -75,14 +78,20 @@ fn validate_one(p: &StartParam, v: &mut Value) -> AppResult<()> {
                 let b = match v.as_str() {
                     Some(s) => matches!(s, "true" | "1" | "on"),
                     None => {
-                        return Err(AppError::BadRequest(format!("入参 '{}' 需为布尔", p.name)));
+                        return Err(AppError::BadRequest(format!(
+                            "入参 '{}' 需为布尔",
+                            p.variable
+                        )));
                     }
                 };
                 *v = Value::Bool(b);
             }
         }
         "json" if !v.is_object() => {
-            return Err(AppError::BadRequest(format!("入参 '{}' 需为对象", p.name)));
+            return Err(AppError::BadRequest(format!(
+                "入参 '{}' 需为对象",
+                p.variable
+            )));
         }
         "json" => {}
         _ => {}
@@ -97,13 +106,15 @@ mod tests {
 
     fn sp(name: &str, kind: &str, required: bool, default: Option<Value>) -> StartParam {
         StartParam {
-            name: name.into(),
+            variable: name.into(),
             label: String::new(),
             kind: kind.into(),
             required,
             default,
             max_length: None,
             options: None,
+            accept: None,
+            max_count: None,
         }
     }
 
@@ -118,7 +129,7 @@ mod tests {
     fn default_filled_and_number_coerced() {
         let p = [
             sp("level", "number", false, Some(json!(2))),
-            sp("msg", "text-input", true, None),
+            sp("msg", "text", true, None),
         ];
         let mut m = HashMap::new();
         m.insert("msg".into(), json!("hi"));

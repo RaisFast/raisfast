@@ -10,7 +10,7 @@ use crate::types::snowflake_id::SnowflakeId;
 use crate::utils::tz::Timestamp;
 
 const RUN_COLS: &str = "id, instance_id, node_id, node_type, seq, attempt, status, \
-     started_at, finished_at, latency_ms, input_summary, output_summary, error, created_at";
+     started_at, finished_at, latency_ms, input_summary, output_summary, usage_json, error, created_at";
 
 #[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -28,6 +28,9 @@ pub struct FlowNodeRun {
     pub latency_ms: Option<i64>,
     pub input_summary: Option<String>,
     pub output_summary: Option<String>,
+    /// LLM usage payload ({"prompt_tokens","completion_tokens","total_tokens"})
+    /// for billing (llm-node.md §6); serialized JSON text.
+    pub usage_json: Option<String>,
     pub error: Option<String>,
     pub created_at: Timestamp,
 }
@@ -37,7 +40,10 @@ fn now() -> Timestamp {
 }
 
 fn is_terminal(status: &str) -> bool {
-    matches!(status, "success" | "failed" | "skipped" | "canceled")
+    matches!(
+        status,
+        "success" | "failed" | "skipped" | "canceled" | "error_output"
+    )
 }
 
 /// Record the latest state of a node for an instance (upsert by instance+node).
@@ -54,6 +60,8 @@ pub async fn record_node_run(
     input: Option<&str>,
     output: Option<&str>,
     error: Option<&str>,
+    usage: Option<&str>,
+    latency_ms: Option<i64>,
 ) -> AppResult<()> {
     let found: Option<i64> = sqlx::query_scalar(crate::db::safe_sql(&format!(
         "SELECT id FROM flow_node_run WHERE instance_id = {} AND node_id = {} \
@@ -75,14 +83,17 @@ pub async fn record_node_run(
             };
             let sql = format!(
                 "UPDATE flow_node_run SET status = {}, attempt = {}, input_summary = {}, \
-                 output_summary = {}, error = {}, finished_at = {} WHERE id = {}",
+                 output_summary = {}, error = {}, usage_json = {}, latency_ms = {}, \
+                 finished_at = {} WHERE id = {}",
                 Driver::ph(1),
                 Driver::ph(2),
                 Driver::ph(3),
                 Driver::ph(4),
                 Driver::ph(5),
                 Driver::ph(6),
-                Driver::ph(7)
+                Driver::ph(7),
+                Driver::ph(8),
+                Driver::ph(9)
             );
             sqlx::query(crate::db::safe_sql(&sql))
                 .bind(status)
@@ -90,6 +101,8 @@ pub async fn record_node_run(
                 .bind(input)
                 .bind(output)
                 .bind(error)
+                .bind(usage)
+                .bind(latency_ms)
                 .bind(finished)
                 .bind(row_id)
                 .execute(pool)
@@ -106,8 +119,9 @@ pub async fn record_node_run(
             .await?;
             let sql = format!(
                 "INSERT INTO flow_node_run (id, instance_id, node_id, node_type, seq, attempt, \
-                 status, finished_at, input_summary, output_summary, error, created_at) \
-                 VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+                 status, finished_at, input_summary, output_summary, error, usage_json, \
+                 latency_ms, created_at) \
+                 VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
                 Driver::ph(1),
                 Driver::ph(2),
                 Driver::ph(3),
@@ -119,13 +133,16 @@ pub async fn record_node_run(
                 Driver::ph(9),
                 Driver::ph(10),
                 Driver::ph(11),
-                Driver::ph(12)
+                Driver::ph(12),
+                Driver::ph(13),
+                Driver::ph(14)
             );
             let finished = if is_terminal(status) {
                 Some(now())
             } else {
                 None
             };
+            let started = now();
             sqlx::query(crate::db::safe_sql(&sql))
                 .bind(*crate::utils::id::new_snowflake_id())
                 .bind(*instance_id)
@@ -138,7 +155,9 @@ pub async fn record_node_run(
                 .bind(input)
                 .bind(output)
                 .bind(error)
-                .bind(now())
+                .bind(usage)
+                .bind(latency_ms)
+                .bind(started)
                 .execute(pool)
                 .await?;
         }

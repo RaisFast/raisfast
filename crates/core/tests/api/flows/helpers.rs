@@ -53,9 +53,14 @@ impl NodeExecutor for Deterministic {
         &self,
         node: &raisfast::flows::graph::GraphNode,
         input: Value,
+        _pool: &raisfast::flows::engine::Pool,
     ) -> raisfast::errors::app_error::AppResult<ExecOutcome> {
         let out = self.outputs.get(&node.id).cloned().unwrap_or(input);
-        Ok(ExecOutcome { output: out })
+        Ok(ExecOutcome {
+            output: out,
+            usage: None,
+            latency_ms: None,
+        })
     }
 }
 

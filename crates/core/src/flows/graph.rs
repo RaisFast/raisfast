@@ -51,6 +51,7 @@ pub struct Edge {
 }
 
 /// Loaded, validated graph ready for execution.
+#[derive(Debug, Clone)]
 pub struct Graph {
     pub nodes: HashMap<String, GraphNode>,
     pub edges: Vec<Edge>,
@@ -149,6 +150,24 @@ pub fn load_graph(graph_value: &Value) -> AppResult<Graph> {
         return Err(AppError::BadRequest("graph 缺少 start 节点".into()));
     };
 
+    // v2 D3: non-empty titles are unique (EndOutput keys default to titles;
+    // picker display must be unambiguous). Unnamed nodes are exempt — the
+    // canvas falls back to the type label.
+    {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for node in nodes.values() {
+            let title = node.data.title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            if !seen.insert(title) {
+                return Err(AppError::BadRequest(format!(
+                    "节点标题重复: '{title}'（v2 要求非空标题唯一）"
+                )));
+            }
+        }
+    }
+
     let mut edges = Vec::new();
     let mut out_edges: HashMap<String, Vec<usize>> = HashMap::new();
     let mut in_edges: HashMap<String, Vec<usize>> = HashMap::new();
@@ -177,14 +196,41 @@ pub fn load_graph(graph_value: &Value) -> AppResult<Graph> {
         edges.push(edge);
     }
 
-    Ok(Graph {
+    // on_error_strategy=error_output nodes must own at least one error_out
+    // edge (llm-node.md §5.3): publish-time 400, never a runtime dead branch.
+    for node in nodes.values() {
+        if node
+            .data
+            .modifiers
+            .get("on_error_strategy")
+            .and_then(Value::as_str)
+            == Some("error_output")
+            && !out_edges.get(&node.id).is_some_and(|idx| {
+                idx.iter()
+                    .any(|&ei| edges[ei].source_handle == nodes::H_ERROR_OUT)
+            })
+        {
+            return Err(AppError::BadRequest(format!(
+                "节点 '{}' 声明 on_error_strategy=error_output 但缺少 error_out 出边",
+                node.id
+            )));
+        }
+    }
+
+    let graph = Graph {
         nodes,
         edges,
         out_edges,
         in_edges,
         in_count,
         start: start_id,
-    })
+    };
+
+    // Reference lint (design D4): existence + upstream laws on every
+    // template / ValueExpr ref in configs and modifiers.
+    super::lint::lint_graph(&graph)?;
+
+    Ok(graph)
 }
 
 /// Convenience: load from a full flow definition (`{... graph: {...}}`).

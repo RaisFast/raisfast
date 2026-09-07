@@ -194,6 +194,8 @@ impl TurnEngine {
                 messages: history.as_slice(),
                 tools: tools_arg,
                 temperature: self.cfg.temperature,
+                max_tokens: None,
+                stop: None,
             };
             let resp = {
                 match emitter.take() {

@@ -70,20 +70,52 @@ pub struct AgentTurnResult {
     pub messages_appended: usize,
 }
 
-/// Create the model provider for an agent from the `[ai]` config section.
-fn provider_for(agent: &AiAgent, ai: &AiConfig) -> AppResult<Arc<dyn ModelProvider>> {
-    let default_base = match agent.provider.as_str() {
-        "ollama" => "http://localhost:11434/v1",
-        _ => "https://api.openai.com/v1",
-    };
+/// Build the platform LLM provider from the `[ai]` config section — shared by
+/// agent turns and the flows `llm` node (OpenAI-compatible endpoint).
+pub fn provider_from_config(ai: &AiConfig) -> AppResult<Arc<dyn ModelProvider>> {
     let base = ai
         .base_url
         .clone()
-        .unwrap_or_else(|| default_base.to_string());
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
     Ok(Arc::new(OpenAiCompatProvider::new(
         base,
         ai.api_key.clone(),
     )))
+}
+
+/// Process-wide shared LLM runtime for the flows `llm` node — set once at
+/// startup (mirrors `integration::set_shared`), read by executors constructed
+/// before/outside AppState. `None` when `[ai]` is disabled/unconfigured.
+pub struct SharedLlm {
+    pub provider: Arc<dyn ModelProvider>,
+    /// `[ai].model` — default when the node config omits one.
+    pub default_model: Option<String>,
+    /// `[ai].timeout_secs` in milliseconds (node `timeout_ms` overrides).
+    pub timeout_ms: u64,
+}
+
+static SHARED_LLM: std::sync::OnceLock<Option<Arc<SharedLlm>>> = std::sync::OnceLock::new();
+
+/// Install the shared LLM runtime (called once from `build_app_state`).
+pub fn set_shared_llm(runtime: Option<Arc<SharedLlm>>) {
+    let _ = SHARED_LLM.set(runtime);
+}
+
+/// Access the shared LLM runtime, if initialized.
+#[must_use]
+pub fn shared_llm() -> Option<Arc<SharedLlm>> {
+    SHARED_LLM.get().cloned().flatten()
+}
+
+/// Create the model provider for an agent from the `[ai]` config section.
+fn provider_for(agent: &AiAgent, ai: &AiConfig) -> AppResult<Arc<dyn ModelProvider>> {
+    if agent.provider == "ollama" && ai.base_url.is_none() {
+        return Ok(Arc::new(OpenAiCompatProvider::new(
+            "http://localhost:11434/v1".to_string(),
+            ai.api_key.clone(),
+        )));
+    }
+    provider_from_config(ai)
 }
 
 /// Model context window (tokens), zeroclaw config semantics: per-model map
@@ -1037,6 +1069,8 @@ async fn consolidate_folded_memory(
         messages: &messages,
         tools: None,
         temperature: Some(0.0),
+        max_tokens: None,
+        stop: None,
     };
     let response = provider
         .chat(&request, &agent.model)
@@ -1241,6 +1275,8 @@ async fn summarize_transcript(ai: &AiConfig, agent: &AiAgent, combined: &str) ->
         messages: &messages,
         tools: None,
         temperature: Some(0.0),
+        max_tokens: None,
+        stop: None,
     };
     let response = provider
         .chat(&request, &agent.model)

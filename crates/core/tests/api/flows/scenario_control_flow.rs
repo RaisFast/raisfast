@@ -16,8 +16,8 @@ async fn linear_chain_with_template_and_refs() {
                 "end",
                 json!({
                     "outputs": [
-                        {"name": "echo", "value": {"ref": ["start", "msg"]}},
-                        {"name": "n", "value": {"literal": 5}}
+                        {"key": "echo", "value": {"ref": ["start", "msg"]}},
+                        {"key": "n", "value": {"literal": 5}}
                     ]
                 })
             )

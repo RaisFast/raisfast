@@ -19,11 +19,15 @@ use crate::plugins::{Permissions, PluginManager};
 
 use super::engine::{ExecOutcome, NodeExecutor};
 use super::graph::GraphNode;
+use super::llm::LlmRuntime;
 use super::nodes::{self, EgressConfig, ScriptConfig};
 
 pub struct FlowsExec {
     pub plane: Option<Arc<IntegrationPlane>>,
     pub plugins: Option<Arc<PluginManager>>,
+    /// Injected LLM provider override (tests); production falls back to the
+    /// shared `[ai]` runtime (llm-node.md §3, W1).
+    pub llm: Option<LlmRuntime>,
 }
 
 impl FlowsExec {
@@ -99,15 +103,63 @@ impl FlowsExec {
         let out = plugins
             .run_inline_script_value("js", &id, &cfg.code, "main", &input, perms)
             .await?;
-        Ok(ExecOutcome { output: out })
+        // v2 D2: script outputs must be objects (flat-addressable); declared
+        // output_schema is validated shallowly (D8) — scalars stop being the
+        // silent "runs but unreferenceable" trap.
+        if !out.is_object() {
+            return Err(AppError::BadRequest(
+                "script: 输出必须是对象（字段才能被下游 {{#id.field#}} 引用）".into(),
+            ));
+        }
+        // Declared output_schema is a flat map `{field: {"type": ...}}` (v2 D8
+        // declarator shape): every declared field must exist and match its
+        // declared type (shallow per-field check).
+        if let Some(schema) = &cfg.output_schema {
+            for (field, decl) in schema {
+                let Some(value) = out.get(field) else {
+                    return Err(AppError::BadRequest(format!(
+                        "script: 声明的输出字段 '{field}' 缺失"
+                    )));
+                };
+                if let Some(want) = decl.get("type") {
+                    let type_schema = serde_json::json!({ "type": want });
+                    if let Err(e) = super::nodes::shallow_schema_check(value, &type_schema) {
+                        return Err(AppError::BadRequest(format!(
+                            "script: 输出字段 '{field}' {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(ExecOutcome {
+            output: out,
+            usage: None,
+            latency_ms: None,
+        })
     }
 }
 
 #[async_trait]
 impl NodeExecutor for FlowsExec {
-    async fn exec(&self, node: &GraphNode, input: Value) -> AppResult<ExecOutcome> {
+    async fn exec(
+        &self,
+        node: &GraphNode,
+        input: Value,
+        pool: &super::engine::Pool,
+    ) -> AppResult<ExecOutcome> {
         match node.data.kind.as_str() {
             nodes::T_SCRIPT => self.run_script(node, input).await,
+            nodes::T_LLM => {
+                let runtime = match &self.llm {
+                    Some(rt) => super::llm::LlmRuntime {
+                        provider: rt.provider.clone(),
+                        default_model: rt.default_model.clone(),
+                        timeout_ms: rt.timeout_ms,
+                    },
+                    None => super::llm::LlmRuntime::shared()?,
+                };
+                super::llm::run_llm(&runtime, node, pool).await
+            }
             nodes::T_EGRESS => {
                 let cfg: EgressConfig = serde_json::from_value(node.data.config.clone())
                     .map_err(|e| AppError::BadRequest(format!("egress config: {e}")))?;
@@ -127,7 +179,9 @@ impl NodeExecutor for FlowsExec {
                         ))
                     })?;
                 Ok(ExecOutcome {
-                    output: receipt.output,
+                    output: serde_json::json!({ "response": receipt.output }),
+                    usage: None,
+                    latency_ms: None,
                 })
             }
             other => Err(AppError::BadRequest(format!(
@@ -162,11 +216,13 @@ mod tests {
         let exec = FlowsExec {
             plane: None,
             plugins: None,
+            llm: None,
         };
         let err = exec
             .exec(
                 &node(nodes::T_EGRESS, json!({"client_key": "k", "op": "o"})),
                 json!({}),
+                &Default::default(),
             )
             .await
             .unwrap_err();
@@ -178,6 +234,7 @@ mod tests {
         let exec = FlowsExec {
             plane: None,
             plugins: None,
+            llm: None,
         };
         let err = exec
             .exec(
@@ -186,6 +243,7 @@ mod tests {
                     json!({"language": "js", "code": "return 1"}),
                 ),
                 json!({}),
+                &Default::default(),
             )
             .await
             .unwrap_err();
@@ -197,11 +255,13 @@ mod tests {
         let exec = FlowsExec {
             plane: None,
             plugins: None,
+            llm: None,
         };
         let err = exec
             .exec(
                 &node(nodes::T_SCRIPT, json!({"language": "rhai", "code": "1"})),
                 json!({}),
+                &Default::default(),
             )
             .await
             .unwrap_err();

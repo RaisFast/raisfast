@@ -11,6 +11,28 @@ use serde_json::Value;
 
 use crate::errors::app_error::{AppError, AppResult};
 
+/// Control types for start inputs (v2: value-oriented names + five-way file
+/// family; `file` is the catch-all "other" bucket).
+pub const START_PARAM_TYPES: &[&str] = &[
+    "text",
+    "paragraph",
+    "select",
+    "number",
+    "boolean",
+    "json",
+    "file",
+    "file-array",
+];
+
+/// Allowed file categories for `accept` (no "any" — other is the catch-all).
+pub const FILE_ACCEPT_TYPES: &[&str] = &["document", "image", "audio", "video", "other"];
+
+/// File-family control types (`accept` applies to these only).
+#[must_use]
+pub fn is_file_kind(kind: &str) -> bool {
+    matches!(kind, "file" | "file-array")
+}
+
 /// Reserved handle names (contracts.md C1.3).
 pub const H_IN: &str = "in";
 pub const H_OUT: &str = "out";
@@ -23,11 +45,13 @@ pub const T_SCRIPT: &str = "script";
 pub const T_EGRESS: &str = "egress";
 pub const T_BRANCH: &str = "branch";
 pub const T_AWAIT: &str = "await";
+pub const T_LLM: &str = "llm";
 
 #[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartParam {
-    pub name: String,
+    /// Variable key of the start namespace (v2: was `name` — one word, one job).
+    pub variable: String,
     #[serde(default)]
     pub label: String,
     #[serde(rename = "type")]
@@ -43,6 +67,15 @@ pub struct StartParam {
     #[serde(default)]
     #[cfg_attr(feature = "export-types", ts(type = "unknown"))]
     pub options: Option<Vec<Value>>,
+    /// File-category constraint, required for `file` / `file-array` params:
+    /// a non-empty subset of document|image|audio|video|other — multi-select
+    /// (e.g. documents AND images) is allowed (v2 — no "any" bucket).
+    #[serde(default)]
+    pub accept: Option<Vec<String>>,
+    /// Max number of files; `file-array` only, integer ≥ 1 when present.
+    #[serde(default)]
+    #[cfg_attr(feature = "export-types", ts(type = "number"))]
+    pub max_count: Option<i64>,
 }
 
 #[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
@@ -55,7 +88,8 @@ pub struct StartConfig {
 #[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct EndOutput {
-    pub name: String,
+    /// Result key in the final run output (v2: was `name`).
+    pub key: String,
     #[serde(default)]
     #[cfg_attr(feature = "export-types", ts(type = "unknown"))]
     pub value: Value,
@@ -141,15 +175,11 @@ pub struct EgressConfig {
     #[serde(default)]
     #[cfg_attr(feature = "export-types", ts(type = "unknown"))]
     pub output_schema: Option<serde_json::Map<String, Value>>,
-    #[serde(default)]
-    pub response_field: Option<String>,
 }
 
 #[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct BranchRule {
-    #[serde(default)]
-    pub id: String,
     #[serde(default)]
     pub label: String,
     /// Structured condition or expression string.
@@ -183,6 +213,121 @@ pub struct AwaitConfig {
     #[serde(default)]
     #[cfg_attr(feature = "export-types", ts(type = "unknown"))]
     pub events: Option<Vec<Value>>,
+}
+
+/// One chat message of an `llm` node: `text` is a C3.1 template (`{{#ns.name#}}`).
+#[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmMessage {
+    pub role: String,
+    pub text: String,
+}
+
+/// `llm` node config (llm-node.md §2). Error handling stays orthogonal via
+/// `modifiers.on_error_strategy` (C1.4); the node ignores engine-fed `input`
+/// (variables are read from the pool through message templates).
+#[cfg_attr(feature = "export-types", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmConfig {
+    pub model: Option<String>,
+    #[serde(default)]
+    pub messages: Vec<LlmMessage>,
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    #[cfg_attr(feature = "export-types", ts(type = "number"))]
+    pub max_tokens: Option<i64>,
+    #[serde(default)]
+    pub stop: Option<Vec<String>>,
+    #[serde(default)]
+    #[cfg_attr(feature = "export-types", ts(type = "number"))]
+    pub timeout_ms: Option<i64>,
+    #[serde(default)]
+    #[cfg_attr(feature = "export-types", ts(type = "unknown"))]
+    pub json_schema: Option<Value>,
+}
+
+/// Declared output fields of a node (v2 D2): what the node writes into its
+/// pool namespace. Drives skip-null semantics (D6) and lint law 3 (D4).
+///
+/// - `start`  → declared start variables
+/// - `script` → `output_schema` properties (empty when undeclared → law-3 skip)
+/// - `egress` → fixed `response`
+/// - `llm`    → fixed `text`/`structured`/`usage`/`latency_ms`
+/// - `await`  → fixed `resume`
+/// - `branch` → fixed `handle`
+#[must_use]
+pub fn declared_output_fields(kind: &str, config: &Value) -> Vec<String> {
+    match kind {
+        T_START => {
+            let Ok(c) = serde_json::from_value::<StartConfig>(config.clone()) else {
+                return Vec::new();
+            };
+            c.params.iter().map(|p| p.variable.clone()).collect()
+        }
+        T_SCRIPT => {
+            let Ok(c) = serde_json::from_value::<ScriptConfig>(config.clone()) else {
+                return Vec::new();
+            };
+            c.output_schema
+                .as_ref()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default()
+        }
+        T_EGRESS => vec!["response".into()],
+        T_LLM => vec![
+            "text".into(),
+            "structured".into(),
+            "usage".into(),
+            "latency_ms".into(),
+        ],
+        T_AWAIT => vec!["resume".into()],
+        T_BRANCH => vec!["handle".into()],
+        _ => Vec::new(),
+    }
+}
+
+/// Shallow JSON-Schema check shared by script output validation and the llm
+/// structured output path: only `type` and `required` (recursive for nested
+/// objects); other keywords ignored (v2 D8 — one validator, no second dialect).
+pub fn shallow_schema_check(value: &Value, schema: &Value) -> Result<(), String> {
+    if let Some(want) = schema.get("type").and_then(Value::as_str) {
+        let ok = match (want, value) {
+            ("object", Value::Object(_))
+            | ("array", Value::Array(_))
+            | ("string", Value::String(_))
+            | ("boolean", Value::Bool(_))
+            | ("null", Value::Null) => true,
+            ("number", Value::Number(_)) => true,
+            ("integer", Value::Number(n)) => n.is_i64() || n.is_u64(),
+            _ => false,
+        };
+        if !ok {
+            return Err(format!("类型不匹配: 期望 {want}"));
+        }
+    }
+    if let (Value::Object(map), Some(required)) =
+        (value, schema.get("required").and_then(Value::as_array))
+    {
+        for key in required {
+            if let Some(k) = key.as_str()
+                && !map.contains_key(k)
+            {
+                return Err(format!("缺少必填字段: {k}"));
+            }
+        }
+    }
+    if let (Value::Object(map), Some(props)) =
+        (value, schema.get("properties").and_then(Value::as_object))
+    {
+        for (k, sub) in props {
+            if let Some(v) = map.get(k)
+                && let Err(e) = shallow_schema_check(v, sub)
+            {
+                return Err(format!("字段 {k}: {e}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate an input value: scalar (literal shorthand) OR exactly one of
@@ -236,8 +381,55 @@ pub fn validate_node(kind: &str, _version: i64, config: &Value) -> AppResult<()>
         T_START => {
             let c: StartConfig = serde_json::from_value(config.clone()).map_err(type_error)?;
             for p in &c.params {
-                if p.name.is_empty() {
-                    return Err(AppError::BadRequest("start.params[].name 不能为空".into()));
+                if p.variable.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "start.params[].variable 不能为空".into(),
+                    ));
+                }
+                if p.max_length.is_some_and(|ml| ml < 1) {
+                    return Err(AppError::BadRequest(format!(
+                        "start.params['{}'].max_length 须为 ≥1 的整数",
+                        p.variable
+                    )));
+                }
+                if !START_PARAM_TYPES.contains(&p.kind.as_str()) {
+                    return Err(AppError::BadRequest(format!(
+                        "start.params['{}'].type '{}' 非法（允许: {}）",
+                        p.variable,
+                        p.kind,
+                        START_PARAM_TYPES.join(" | ")
+                    )));
+                }
+                if is_file_kind(&p.kind) {
+                    let accepts = p.accept.as_deref().unwrap_or(&[]);
+                    let valid = !accepts.is_empty()
+                        && accepts
+                            .iter()
+                            .all(|a| FILE_ACCEPT_TYPES.contains(&a.as_str()));
+                    if !valid {
+                        return Err(AppError::BadRequest(format!(
+                            "start.params['{}'].accept 须为 {} 的非空子集（可多选，不允许任意文件）",
+                            p.variable,
+                            FILE_ACCEPT_TYPES.join(" | ")
+                        )));
+                    }
+                } else if p.accept.is_some() {
+                    return Err(AppError::BadRequest(format!(
+                        "start.params['{}'].accept 仅用于 file/file-array 类型",
+                        p.variable
+                    )));
+                }
+                if p.max_count.is_some() && p.kind != "file-array" {
+                    return Err(AppError::BadRequest(format!(
+                        "start.params['{}'].max_count 仅用于 file-array 类型",
+                        p.variable
+                    )));
+                }
+                if p.max_count.is_some_and(|c| c < 1) {
+                    return Err(AppError::BadRequest(format!(
+                        "start.params['{}'].max_count 须为 ≥1 的整数",
+                        p.variable
+                    )));
                 }
             }
         }
@@ -269,6 +461,57 @@ pub fn validate_node(kind: &str, _version: i64, config: &Value) -> AppResult<()>
         T_AWAIT => {
             let _c: AwaitConfig = serde_json::from_value(config.clone()).map_err(type_error)?;
         }
+        T_LLM => {
+            let c: LlmConfig = serde_json::from_value(config.clone()).map_err(type_error)?;
+            if c.messages.is_empty() {
+                return Err(AppError::BadRequest(
+                    "llm: messages 不能为空且需至少一条 user".into(),
+                ));
+            }
+            if c.messages[0].role == "system" && c.messages.len() == 1 {
+                return Err(AppError::BadRequest(
+                    "llm: messages 不能为空且需至少一条 user".into(),
+                ));
+            }
+            if !c.messages.iter().any(|m| m.role == "user") {
+                return Err(AppError::BadRequest(
+                    "llm: messages 不能为空且需至少一条 user".into(),
+                ));
+            }
+            for m in &c.messages {
+                if !matches!(m.role.as_str(), "system" | "user" | "assistant") {
+                    return Err(AppError::BadRequest(format!(
+                        "llm: role '{}' 非法 (system|user|assistant)",
+                        m.role
+                    )));
+                }
+                if m.text.trim().is_empty() {
+                    return Err(AppError::BadRequest(format!(
+                        "llm: messages[{}] text 不能为空",
+                        m.role
+                    )));
+                }
+            }
+            if let Some(t) = c.temperature
+                && !(0.0..=2.0).contains(&t)
+            {
+                return Err(AppError::BadRequest("llm: temperature 须在 [0,2]".into()));
+            }
+            if c.max_tokens.is_some_and(|t| t <= 0) {
+                return Err(AppError::BadRequest("llm: max_tokens 须 > 0".into()));
+            }
+            if c.stop.as_ref().is_some_and(|s| s.len() > 4) {
+                return Err(AppError::BadRequest("llm: stop 最多 4 条".into()));
+            }
+            if let Some(schema) = &c.json_schema
+                && !(schema.is_object()
+                    && schema.get("type").and_then(Value::as_str) == Some("object"))
+            {
+                return Err(AppError::BadRequest(
+                    "llm: json_schema 须为 {\"type\":\"object\",...}".into(),
+                ));
+            }
+        }
         other => {
             return Err(AppError::BadRequest(format!(
                 "node type '{other}' not supported (v1: start|end|script|egress|branch)"
@@ -289,6 +532,7 @@ pub enum NodeKind {
     Egress,
     Branch,
     Await,
+    Llm,
 }
 
 /// TS-only union of every node's config shape (editor drives panels off it).
@@ -305,6 +549,7 @@ pub enum NodeConfigVariant {
     Egress(EgressConfig),
     Branch(BranchConfig),
     Await(AwaitConfig),
+    Llm(LlmConfig),
 }
 
 /// TS-only union for ValueExpr (literal | ref selector | expr string).
@@ -350,6 +595,141 @@ mod tests {
         assert!(
             validate_value_expr("x", &json!({"ref": ["a"], "literal": 1})).is_err(),
             "多键"
+        );
+    }
+
+    #[test]
+    fn start_param_max_length_bounds() {
+        let ok = json!({
+            "params": [
+                {"variable": "q", "label": "Q", "type": "text", "required": true, "max_length": 100}
+            ]
+        });
+        assert!(validate_node(T_START, 1, &ok).is_ok());
+
+        for bad in [0, -5] {
+            let cfg = json!({
+                "params": [
+                    {"variable": "q", "label": "Q", "type": "text", "max_length": bad}
+                ]
+            });
+            let err = validate_node(T_START, 1, &cfg).unwrap_err();
+            assert!(err.to_string().contains("max_length"), "{err}");
+        }
+
+        // fractional input is rejected at deserialization (i64)
+        let frac = json!({
+            "params": [
+                {"variable": "q", "label": "Q", "type": "text", "max_length": 1.5}
+            ]
+        });
+        assert!(validate_node(T_START, 1, &frac).is_err());
+    }
+
+    #[test]
+    fn start_param_file_accept_rules() {
+        // file without accept -> rejected (no "any" files)
+        let bad = json!({
+            "params": [{"variable": "f", "label": "F", "type": "file", "required": true}]
+        });
+        let err = validate_node(T_START, 1, &bad).unwrap_err();
+        assert!(err.to_string().contains("accept"), "{err}");
+
+        // file-array + multi-category accept -> ok
+        let ok = json!({
+            "params": [
+                {"variable": "imgs", "label": "Images", "type": "file-array", "accept": ["image", "document"]}
+            ]
+        });
+        assert!(validate_node(T_START, 1, &ok).is_ok());
+
+        // empty accept array -> rejected
+        let empty = json!({
+            "params": [{"variable": "f", "label": "F", "type": "file", "accept": []}]
+        });
+        assert!(validate_node(T_START, 1, &empty).is_err());
+
+        // accept outside the 5 categories -> rejected
+        let bad2 = json!({
+            "params": [{"variable": "f", "label": "F", "type": "file", "accept": ["anything"]}]
+        });
+        assert!(validate_node(T_START, 1, &bad2).is_err());
+
+        // accept on non-file type -> rejected
+        let bad3 = json!({
+            "params": [{"variable": "q", "label": "Q", "type": "text", "accept": "image"}]
+        });
+        assert!(validate_node(T_START, 1, &bad3).is_err());
+
+        // legacy control type renamed away -> rejected
+        let bad4 = json!({
+            "params": [{"variable": "q", "label": "Q", "type": "text-input"}]
+        });
+        assert!(validate_node(T_START, 1, &bad4).is_err());
+    }
+
+    #[test]
+    fn llm_config_validation() {
+        let ok = json!({
+            "messages": [
+                {"role": "system", "text": "你是助手"},
+                {"role": "user", "text": "hi {{#start.q#}}"}
+            ],
+            "temperature": 0.3, "max_tokens": 100, "stop": ["\n"]
+        });
+        assert!(validate_node(T_LLM, 1, &ok).is_ok());
+
+        assert!(
+            validate_node(T_LLM, 1, &json!({"messages": []})).is_err(),
+            "空 messages"
+        );
+        assert!(
+            validate_node(
+                T_LLM,
+                1,
+                &json!({"messages": [{"role": "system", "text": "only sys"}]})
+            )
+            .is_err(),
+            "只有 system 无 user"
+        );
+        assert!(
+            validate_node(
+                T_LLM,
+                1,
+                &json!({"messages": [{"role": "tool", "text": "x"}]})
+            )
+            .is_err(),
+            "非法 role"
+        );
+        assert!(
+            validate_node(
+                T_LLM,
+                1,
+                &json!({"messages": [{"role": "user", "text": "x"}], "temperature": 5.0})
+            )
+            .is_err(),
+            "temperature 越界"
+        );
+        assert!(
+            validate_node(
+                T_LLM,
+                1,
+                &json!({"messages": [{"role": "user", "text": "x"}], "stop": ["a","b","c","d","e"]})
+            )
+            .is_err(),
+            "stop 超 4 条"
+        );
+        assert!(
+            validate_node(
+                T_LLM,
+                1,
+                &json!({
+                    "messages": [{"role": "user", "text": "x"}],
+                    "json_schema": {"type": "array"}
+                })
+            )
+            .is_err(),
+            "json_schema 非 object"
         );
     }
 }

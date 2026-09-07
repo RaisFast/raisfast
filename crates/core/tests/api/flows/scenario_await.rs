@@ -34,7 +34,7 @@ async fn seed_waiting_instance(pool: &raisfast::db::Pool) -> i64 {
                 "end",
                 "end",
                 json!({
-                    "outputs": [{"name": "ok", "value": {"ref": ["gate", "resume", "approved"]}}]
+                    "outputs": [{"key": "ok", "value": {"ref": ["gate", "resume", "approved"]}}]
                 })
             )
         ]),

@@ -18,13 +18,17 @@ impl raisfast::flows::engine::NodeExecutor for Flaky {
         &self,
         _n: &raisfast::flows::graph::GraphNode,
         _i: Value,
+        _pool: &raisfast::flows::engine::Pool,
     ) -> raisfast::errors::app_error::AppResult<raisfast::flows::engine::ExecOutcome> {
         let c = self.calls.fetch_add(1, Ordering::SeqCst);
         if c < self.fail_until {
-            Err(AppError::BadRequest("boom".into()))
+            // Internal (retryable): BadRequest now short-circuits retries.
+            Err(AppError::Internal(anyhow::anyhow!("boom")))
         } else {
             Ok(raisfast::flows::engine::ExecOutcome {
                 output: json!({"ok": true}),
+                usage: None,
+                latency_ms: None,
             })
         }
     }
@@ -146,6 +150,8 @@ async fn durable_resume_does_not_rerun_completed_nodes() {
             output: Some(json!(null)),
             error: None,
             attempt: 1,
+            usage: None,
+            latency_ms: None,
         },
     );
     model::upsert_snapshot(&pool, flow_id, &serde_json::to_value(&snap).unwrap())

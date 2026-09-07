@@ -163,6 +163,17 @@ impl OpenAiCompatProvider {
         if let Some(temperature) = request.temperature {
             payload.insert("temperature".into(), Value::from(temperature));
         }
+        if let Some(max_tokens) = request.max_tokens {
+            payload.insert("max_tokens".into(), Value::from(max_tokens));
+        }
+        if let Some(stop) = &request.stop
+            && !stop.is_empty()
+        {
+            payload.insert(
+                "stop".into(),
+                Value::Array(stop.iter().map(|s| Value::String(s.clone())).collect()),
+            );
+        }
         if stream {
             payload.insert("stream".into(), Value::Bool(true));
             payload.insert("stream_options".into(), json!({ "include_usage": true }));

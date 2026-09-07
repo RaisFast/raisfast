@@ -7752,7 +7752,7 @@ async fn flow_engine_egress_e2e_acceptance() {
                     "input": {"query": {"literal": "hi"}}
                 }}},
                 {"id": "end", "data": {"type": "end", "config": {
-                    "outputs": [{"name": "ans", "value": {"ref": ["e1", "output", "text"]}}]
+                    "outputs": [{"key": "ans", "value": {"ref": ["e1", "response", "text"]}}]
                 }}}
             ],
             "edges": [
@@ -7806,6 +7806,7 @@ async fn flow_engine_egress_e2e_acceptance() {
     let exec = FlowsExec {
         plane: Some(plane.clone()),
         plugins: Some(state.plugins.clone()),
+        llm: None,
     };
     run::execute_instance(&state.pool, instance_id, &exec)
         .await

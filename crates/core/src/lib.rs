@@ -316,6 +316,22 @@ pub async fn build_app_state(
         None
     };
 
+    // Shared LLM runtime for the flows `llm` node (mirrors the integration
+    // shared-handle pattern; llm-node.md §3 W1 — built once, never per call).
+    crate::agent::service::set_shared_llm(if config.ai.enabled {
+        crate::agent::service::provider_from_config(&config.ai)
+            .ok()
+            .map(|provider| {
+                std::sync::Arc::new(crate::agent::service::SharedLlm {
+                    provider,
+                    default_model: config.ai.model.clone(),
+                    timeout_ms: config.ai.timeout_secs.saturating_mul(1000),
+                })
+            })
+    } else {
+        None
+    });
+
     // App Bundle late attach: reconcile plugin state with app status
     // (non-enabled apps unload the plugins load_all picked up from disk).
     apps_registry

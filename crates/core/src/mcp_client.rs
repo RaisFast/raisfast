@@ -345,130 +345,6 @@ impl Drop for McpSession {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn request_serializes_with_id_and_notification_omits_id() {
-        let req = JsonRpcRequest::new(1, "tools/list", serde_json::json!({}));
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(s.contains("\"id\":1"));
-        let notif =
-            JsonRpcRequest::notification("notifications/initialized", serde_json::json!({}));
-        assert!(!serde_json::to_string(&notif).unwrap().contains("\"id\""));
-    }
-
-    #[test]
-    fn tool_def_and_list_result_deserialize() {
-        let json =
-            r#"{"tools":[{"name":"add","description":"add","inputSchema":{"type":"object"}}]}"#;
-        let list: McpToolsListResult = serde_json::from_str(json).unwrap();
-        assert_eq!(list.tools.len(), 1);
-        assert_eq!(list.tools[0].name, "add");
-    }
-
-    #[test]
-    fn content_text_joins_text_blocks() {
-        let v = serde_json::json!([{"type":"text","text":"a"},{"type":"image","data":"x"},{"type":"text","text":"b"}]);
-        assert_eq!(content_text(Some(&v)).unwrap(), "a\nb");
-        assert!(content_text(Some(&serde_json::json!([]))).is_none());
-    }
-
-    #[tokio::test]
-    async fn http_session_against_bun_hono_fixture() {
-        use std::process::Stdio;
-        // Skip when bun isn't installed (CI may not have it).
-        let check = tokio::process::Command::new("bun")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut check) = check else {
-            println!("bun not installed; skipping");
-            return;
-        };
-        let _ = check.wait().await;
-
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent());
-        let script = root
-            .map(|r| r.join("scripts/agents/mcp_server/mcp_http_server.ts"))
-            .expect("workspace root");
-        assert!(
-            script.exists(),
-            "http fixture missing: {}",
-            script.display()
-        );
-        let mut server = tokio::process::Command::new("bun")
-            .arg("run")
-            .arg(&script)
-            .env("PORT", "9897")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn bun fixture");
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-
-        let cfg: McpServerConfig = serde_json::from_value(serde_json::json!({
-            "name": "bun-echo",
-            "url": "http://127.0.0.1:9897",
-        }))
-        .expect("parse cfg");
-        let mut session = McpHttpSession::new(&cfg);
-        session.initialize().await.expect("http initialize");
-        let tools = session.list_tools().await.expect("http list_tools");
-        assert_eq!(tools.len(), 1);
-        let out = session
-            .call_tool("echo", serde_json::json!({ "msg": "hi-from-http" }))
-            .await
-            .expect("http call_tool");
-        assert_eq!(out, "echo:hi-from-http");
-        let _ = server.kill().await;
-    }
-
-    #[tokio::test]
-    async fn stdio_session_lists_and_calls_local_echo_server() {
-        // Deterministic offline check: spawn the vendored echo server fixture
-        // (python3) and verify discover + call through the real stdio path.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent());
-        let script = root
-            .map(|r| r.join("scripts/agents/mcp_echo_server.py"))
-            .expect("workspace root");
-        assert!(
-            script.exists(),
-            "echo fixture missing: {}",
-            script.display()
-        );
-        let mut session = McpSession::connect(&McpServerConfig {
-            name: "echo".into(),
-            transport: McpTransport::Stdio,
-            url: None,
-            command: "python3".into(),
-            args: vec![script.to_string_lossy().into_owned()],
-            headers: Default::default(),
-            tool_timeout_secs: None,
-            max_response_bytes: None,
-        })
-        .await
-        .expect("connect to echo server");
-
-        let tools = session.list_tools().await.expect("list_tools");
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
-        let out = session
-            .call_tool("echo", serde_json::json!({ "msg": "hello-mcp" }))
-            .await
-            .expect("call_tool");
-        assert_eq!(out, "echo:hello-mcp", "output: {out}");
-    }
-}
-
 // ── streamable HTTP client (stateless JSON mode) ────────────────────────────
 //
 // Sends each request as a POST whose JSON body carries the JSON-RPC message.
@@ -624,5 +500,129 @@ impl McpHttpSession {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn request_serializes_with_id_and_notification_omits_id() {
+        let req = JsonRpcRequest::new(1, "tools/list", serde_json::json!({}));
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"id\":1"));
+        let notif =
+            JsonRpcRequest::notification("notifications/initialized", serde_json::json!({}));
+        assert!(!serde_json::to_string(&notif).unwrap().contains("\"id\""));
+    }
+
+    #[test]
+    fn tool_def_and_list_result_deserialize() {
+        let json =
+            r#"{"tools":[{"name":"add","description":"add","inputSchema":{"type":"object"}}]}"#;
+        let list: McpToolsListResult = serde_json::from_str(json).unwrap();
+        assert_eq!(list.tools.len(), 1);
+        assert_eq!(list.tools[0].name, "add");
+    }
+
+    #[test]
+    fn content_text_joins_text_blocks() {
+        let v = serde_json::json!([{"type":"text","text":"a"},{"type":"image","data":"x"},{"type":"text","text":"b"}]);
+        assert_eq!(content_text(Some(&v)).unwrap(), "a\nb");
+        assert!(content_text(Some(&serde_json::json!([]))).is_none());
+    }
+
+    #[tokio::test]
+    async fn http_session_against_bun_hono_fixture() {
+        use std::process::Stdio;
+        // Skip when bun isn't installed (CI may not have it).
+        let check = tokio::process::Command::new("bun")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut check) = check else {
+            println!("bun not installed; skipping");
+            return;
+        };
+        let _ = check.wait().await;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent());
+        let script = root
+            .map(|r| r.join("scripts/agents/mcp_server/mcp_http_server.ts"))
+            .expect("workspace root");
+        assert!(
+            script.exists(),
+            "http fixture missing: {}",
+            script.display()
+        );
+        let mut server = tokio::process::Command::new("bun")
+            .arg("run")
+            .arg(&script)
+            .env("PORT", "9897")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn bun fixture");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let cfg: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "name": "bun-echo",
+            "url": "http://127.0.0.1:9897",
+        }))
+        .expect("parse cfg");
+        let mut session = McpHttpSession::new(&cfg);
+        session.initialize().await.expect("http initialize");
+        let tools = session.list_tools().await.expect("http list_tools");
+        assert_eq!(tools.len(), 1);
+        let out = session
+            .call_tool("echo", serde_json::json!({ "msg": "hi-from-http" }))
+            .await
+            .expect("http call_tool");
+        assert_eq!(out, "echo:hi-from-http");
+        let _ = server.kill().await;
+    }
+
+    #[tokio::test]
+    async fn stdio_session_lists_and_calls_local_echo_server() {
+        // Deterministic offline check: spawn the vendored echo server fixture
+        // (python3) and verify discover + call through the real stdio path.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent());
+        let script = root
+            .map(|r| r.join("scripts/agents/mcp_echo_server.py"))
+            .expect("workspace root");
+        assert!(
+            script.exists(),
+            "echo fixture missing: {}",
+            script.display()
+        );
+        let mut session = McpSession::connect(&McpServerConfig {
+            name: "echo".into(),
+            transport: McpTransport::Stdio,
+            url: None,
+            command: "python3".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            headers: Default::default(),
+            tool_timeout_secs: None,
+            max_response_bytes: None,
+        })
+        .await
+        .expect("connect to echo server");
+
+        let tools = session.list_tools().await.expect("list_tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        let out = session
+            .call_tool("echo", serde_json::json!({ "msg": "hello-mcp" }))
+            .await
+            .expect("call_tool");
+        assert_eq!(out, "echo:hello-mcp", "output: {out}");
     }
 }

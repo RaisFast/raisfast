@@ -98,7 +98,11 @@ pub async fn run_flow_latest(
     };
     model::insert_flow_instance(pool, &instance).await?;
 
-    let exec = FlowsExec { plane, plugins };
+    let exec = FlowsExec {
+        plane,
+        plugins,
+        llm: None,
+    };
     execute_instance(pool, instance_id, &exec).await?;
     model::find_instance_by_id(pool, instance_id).await
 }
@@ -159,7 +163,11 @@ pub async fn run_definition_latest(
         pool: pool.clone(),
         instance_id,
     };
-    let exec = FlowsExec { plane, plugins };
+    let exec = FlowsExec {
+        plane,
+        plugins,
+        llm: None,
+    };
     engine::run_persisted(&graph, &mut snap, &exec, &persist).await?;
     record_node_runs(pool, instance_id, &graph, &snap).await?;
 
@@ -283,7 +291,10 @@ async fn record_node_runs(
             continue;
         };
         let status = st.status.as_str();
-        if !matches!(status, "success" | "failed" | "skipped" | "waiting") {
+        if !matches!(
+            status,
+            "success" | "failed" | "skipped" | "waiting" | "error_output"
+        ) {
             continue;
         }
         let Some(node) = graph.nodes.get(node_id) else {
@@ -298,6 +309,7 @@ async fn record_node_runs(
         });
         let input = st.input.as_ref().map(|v| v.to_string());
         let output = st.output.as_ref().map(|v| v.to_string());
+        let usage = st.usage.as_ref().map(|v| v.to_string());
         model::record_node_run(
             pool,
             instance_id,
@@ -308,6 +320,8 @@ async fn record_node_runs(
             input.as_deref(),
             output.as_deref(),
             error.as_deref(),
+            usage.as_deref(),
+            st.latency_ms,
         )
         .await?;
     }
@@ -353,9 +367,12 @@ impl NodeExecutor for NoopExec {
         &self,
         _node: &super::graph::GraphNode,
         _input: serde_json::Value,
+        _pool: &engine::Pool,
     ) -> AppResult<super::engine::ExecOutcome> {
         Ok(super::engine::ExecOutcome {
             output: serde_json::Value::Null,
+            usage: None,
+            latency_ms: None,
         })
     }
 }
@@ -372,9 +389,12 @@ mod tests {
             &self,
             _node: &crate::flows::graph::GraphNode,
             _input: Value,
+            _pool: &engine::Pool,
         ) -> AppResult<engine::ExecOutcome> {
             Ok(engine::ExecOutcome {
                 output: json!({"stub": true}),
+                usage: None,
+                latency_ms: None,
             })
         }
     }
@@ -404,7 +424,7 @@ mod tests {
                 "nodes": [
                     {"id": "start", "data": {"type": "start", "config": {}}},
                     {"id": "e1", "data": {"type": "egress", "config": {"client_key": "k", "op": "o"}}},
-                    {"id": "end", "data": {"type": "end", "config": {"outputs": [{"name": "v", "value": {"ref": ["e1", "output"]}}]}}}
+                    {"id": "end", "data": {"type": "end", "config": {"outputs": [{"key": "v", "value": {"ref": ["e1"]}}]}}}
                 ],
                 "edges": [
                     {"source": "start", "target": "e1"},
@@ -495,6 +515,8 @@ mod tests {
                 output: Some(Value::Null),
                 error: None,
                 attempt: 1,
+                usage: None,
+                latency_ms: None,
             },
         );
         let snap_json = serde_json::to_value(&snap).unwrap();

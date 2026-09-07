@@ -11,6 +11,10 @@ pub struct ChatRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
     pub temperature: Option<f64>,
+    /// Sampling budget; provider wire name `max_tokens` (None = server default).
+    pub max_tokens: Option<i64>,
+    /// Up to 4 stop sequences (OpenAI wire limit).
+    pub stop: Option<Vec<String>>,
 }
 
 /// A completed non-streaming chat response.

@@ -1459,6 +1459,7 @@ CREATE TABLE IF NOT EXISTS flow_node_run (
     latency_ms INTEGER,
     input_summary TEXT,
     output_summary TEXT,
+    usage_json TEXT,
     error TEXT,
     egress_log_id INTEGER,
     container_ref TEXT,

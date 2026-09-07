@@ -16,8 +16,18 @@ use crate::errors::app_error::{AppError, AppResult};
 use super::engine::Pool;
 
 fn resolve_ref_in_pool(pool: &Pool, sel: &[&str]) -> AppResult<Value> {
-    if sel.len() < 2 {
-        return Err(AppError::BadRequest("ref 需至少 [namespace, name]".into()));
+    // v2 D7: a single-segment `[ns]` resolves to the node's whole namespace
+    // (object of its declared fields).
+    if sel.len() == 1 {
+        let ns = sel[0];
+        let m = pool
+            .get(ns)
+            .ok_or_else(|| AppError::BadRequest(format!("ref 引用不存在: {ns}")))?;
+        let map: serde_json::Map<String, Value> = m.clone().into_iter().collect();
+        return Ok(Value::Object(map));
+    }
+    if sel.is_empty() {
+        return Err(AppError::BadRequest("ref 不能为空".into()));
     }
     let ns = sel[0];
     let name = sel[1];
@@ -36,6 +46,10 @@ fn resolve_ref_in_pool(pool: &Pool, sel: &[&str]) -> AppResult<Value> {
 }
 
 /// Positions + inner selector of `{{#sel#}}` tokens in a string.
+///
+/// `i` always sits on a UTF-8 char boundary (tokens are ASCII, so they can
+/// only start on boundaries anyway); advancing byte-by-byte would slice into
+/// multi-byte characters and panic on CJK text.
 fn find_tokens(text: &str) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -48,9 +62,19 @@ fn find_tokens(text: &str) -> Vec<(usize, usize, String)> {
             i += 3 + rel + 3;
             continue;
         }
-        i += 1;
+        i += text[i..].chars().next().map_or(1, char::len_utf8);
     }
     out
+}
+
+/// Inner selectors (`ns.field.child`) of every `{{#…#}}` token in `text`.
+/// Shared with the publish-time reference lint (design D4).
+#[must_use]
+pub fn selectors_in_text(text: &str) -> Vec<String> {
+    find_tokens(text)
+        .into_iter()
+        .map(|(_, _, inner)| inner)
+        .collect()
 }
 
 /// Resolve a string possibly containing `{{#sel#}}`: a single whole-string

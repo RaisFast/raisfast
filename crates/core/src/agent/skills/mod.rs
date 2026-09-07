@@ -266,9 +266,9 @@ mod tests {
             disallowed_tools: Vec::new(),
             dir: PathBuf::new(),
         };
-        let full = render_skills(&[s.clone()], true).unwrap();
+        let full = render_skills(std::slice::from_ref(&s), true).unwrap();
         assert!(full.contains("<instruction>step 1</instruction>"));
-        let compact = render_skills(&[s.clone()], false).unwrap();
+        let compact = render_skills(std::slice::from_ref(&s), false).unwrap();
         assert!(!compact.contains("<instruction>"));
         assert!(compact.contains("read_skill"));
         let always = LoadedSkill {

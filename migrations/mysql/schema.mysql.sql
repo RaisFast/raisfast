@@ -1398,6 +1398,7 @@ CREATE TABLE IF NOT EXISTS flow_node_run (
     latency_ms BIGINT NULL,
     input_summary JSON,
     output_summary JSON,
+    usage_json JSON,
     error JSON,
     egress_log_id BIGINT NULL,
     container_ref JSON,
