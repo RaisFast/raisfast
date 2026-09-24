@@ -116,8 +116,8 @@ pub async fn run<T: DeserializeOwned>(
 ) -> Result<T, ComputeError> {
     let exe = std::env::current_exe()
         .map_err(|e| ComputeError::Unavailable(format!("current_exe: {e}")))?;
-    let dir = TempWorkspace::new()
-        .map_err(|e| ComputeError::Unavailable(format!("tempdir: {e}")))?;
+    let dir =
+        TempWorkspace::new().map_err(|e| ComputeError::Unavailable(format!("tempdir: {e}")))?;
     let input_path = dir.path().join("in.bin");
     let params_path = dir.path().join("params.json");
     let output_path = dir.path().join("out.json");
@@ -196,10 +196,8 @@ struct TempWorkspace {
 
 impl TempWorkspace {
     fn new() -> std::io::Result<Self> {
-        let dir = std::env::temp_dir().join(format!(
-            "raisfast-compute-{}",
-            crate::utils::id::new_id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("raisfast-compute-{}", crate::utils::id::new_id()));
         std::fs::create_dir_all(&dir)?;
         Ok(Self { dir })
     }

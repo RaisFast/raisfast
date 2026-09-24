@@ -88,7 +88,9 @@ impl super::ParseEngine for BuiltinEngine {
                 }
                 Err(crate::compute::ComputeError::Rejected(msg)) => {
                     // A real parse failure — do not retry in-process.
-                    return Err(AppError::BadRequest(format!("document parse failed: {msg}")));
+                    return Err(AppError::BadRequest(format!(
+                        "document parse failed: {msg}"
+                    )));
                 }
                 Err(crate::compute::ComputeError::Unavailable(e)) => {
                     tracing::warn!("parse subprocess unavailable ({e}); falling back in-process");

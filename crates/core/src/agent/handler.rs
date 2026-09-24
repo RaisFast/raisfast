@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::response::sse::{Event as SseEvent, Sse};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures::Stream;
 use raisfast_agent::CancellationToken;
 use serde::Deserialize;
@@ -174,6 +174,83 @@ pub fn routes(
         delete_session,
         "system",
         "ai/sessions",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/sessions/{id}/debate",
+        post,
+        start_anchored_debate,
+        "system",
+        "ai/debates",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/debates",
+        post,
+        start_cold_debate,
+        "system",
+        "ai/debates",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/debates",
+        get,
+        list_my_debates,
+        "system",
+        "ai/debates",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/debates/{id}",
+        get,
+        get_debate,
+        "system",
+        "ai/debates",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/debates/{id}",
+        delete,
+        cancel_debate,
+        "system",
+        "ai/debates",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/debates/{id}/verdicts",
+        post,
+        submit_debate_verdicts,
+        "system",
+        "ai/debates",
+        "authed"
+    );
+    let r = reg_route!(
+        r,
+        registry,
+        _config.api_restful,
+        "/ai/debates/{id}/events",
+        get,
+        debate_events,
+        "system",
+        "ai/debates",
         "authed"
     );
     let r = reg_route!(
@@ -992,6 +1069,20 @@ pub async fn run_turn(
         return Err(AppError::ForbiddenOwnership);
     }
     let agent = ai_service::find_agent(&state.pool, session.agent_id, auth.tenant_id()).await?;
+    // Reviewer-component agents are debate-internal (multi-agent D-A14):
+    // their prompt is ledger-shaped, so direct chat is undefined behavior.
+    // Admin playground stays exempt for prompt debugging.
+    let is_reviewer = agent
+        .params
+        .as_ref()
+        .and_then(|p| p.get("debate_role"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|r| r == "reviewer");
+    if is_reviewer && !auth.is_super_admin() {
+        return Err(AppError::Conflict(
+            "reviewer component agent — use /ai/debates (multi-agent D-A14)".into(),
+        ));
+    }
     let extra_tools =
         crate::agent::tools::build_domain_tools(&state, &auth, Some(&agent), Some(session.id))
             .await;
@@ -1149,4 +1240,228 @@ fn done_event(outcome: &AgentTurnResult) -> SseEvent {
         },
     });
     SseEvent::default().event("done").data(data.to_string())
+}
+
+// ── Debates (multi-agent M-A4; dev-docs/agent/multi-agent.md §11) ──────
+
+use crate::agent::debate::orchestrator::{self, VerdictInput};
+use crate::agent::models::ai_debate as debate_model;
+
+#[derive(Deserialize)]
+pub struct AnchoredDebateReq {
+    pub reviewer_agent_id: String,
+    pub max_rounds: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct ColdDebateReq {
+    pub agent_a_id: String,
+    pub agent_b_id: String,
+    pub requirement: String,
+    pub max_rounds: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct VerdictsReq {
+    pub verdicts: Vec<VerdictBody>,
+}
+
+#[derive(Deserialize)]
+pub struct VerdictBody {
+    pub dispute_id: String,
+    pub verdict: String,
+    pub resolution: Option<String>,
+    pub note: Option<String>,
+}
+
+/// Owner-or-admin policy shared by debate read/verdict/cancel endpoints.
+fn debate_access(auth: &AuthUser, debate: &debate_model::AiDebate) -> AppResult<()> {
+    let owner = current_owner(auth)?;
+    if debate.user_id == owner || auth.is_super_admin() {
+        Ok(())
+    } else {
+        Err(AppError::ForbiddenOwnership)
+    }
+}
+
+/// `POST /ai/sessions/{id}/debate` — session-anchored primary entry
+/// (multi-agent §6.2): the proposer is the session's own agent and R0 runs
+/// in the origin session itself.
+pub async fn start_anchored_debate(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AnchoredDebateReq>,
+) -> AppResult<ApiResponse<serde_json::Value>> {
+    let owner = current_owner(&auth)?;
+    let session_id = crate::types::snowflake_id::parse_id(&id)?;
+    let session = ai_service::find_session(&state.pool, session_id, auth.tenant_id()).await?;
+    if session.user_id != owner {
+        return Err(AppError::ForbiddenOwnership);
+    }
+    let reviewer = crate::types::snowflake_id::parse_id(&body.reviewer_agent_id)?;
+    let debate = orchestrator::start_debate(
+        &state,
+        &auth,
+        session.agent_id,
+        reviewer,
+        Some(session.id),
+        if session.title.is_empty() {
+            format!("session {}", session.id.0)
+        } else {
+            session.title.clone()
+        },
+        body.max_rounds,
+    )
+    .await?;
+    Ok(ApiResponse::success(json!({ "debate": debate })))
+}
+
+/// `POST /ai/debates` — cold start (headless/API): explicit requirement text.
+pub async fn start_cold_debate(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Json(body): Json<ColdDebateReq>,
+) -> AppResult<ApiResponse<serde_json::Value>> {
+    let a = crate::types::snowflake_id::parse_id(&body.agent_a_id)?;
+    let b = crate::types::snowflake_id::parse_id(&body.agent_b_id)?;
+    let debate =
+        orchestrator::start_debate(&state, &auth, a, b, None, body.requirement, body.max_rounds)
+            .await?;
+    Ok(ApiResponse::success(json!({ "debate": debate })))
+}
+
+/// `GET /ai/debates/{id}` — status + ledger + report.
+pub async fn get_debate(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<ApiResponse<serde_json::Value>> {
+    let debate_id = crate::types::snowflake_id::parse_id(&id)?;
+    let debate = debate_model::find_debate_by_id(&state.pool, debate_id, auth.tenant_id()).await?;
+    debate_access(&auth, &debate)?;
+    Ok(ApiResponse::success(json!({ "debate": debate })))
+}
+
+/// `POST /ai/debates/{id}/verdicts` — human judgments (§8); when all
+/// escalated disputes are consumed the final round runs in the background.
+pub async fn submit_debate_verdicts(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<VerdictsReq>,
+) -> AppResult<ApiResponse<serde_json::Value>> {
+    let debate_id = crate::types::snowflake_id::parse_id(&id)?;
+    let debate = debate_model::find_debate_by_id(&state.pool, debate_id, auth.tenant_id()).await?;
+    debate_access(&auth, &debate)?;
+    let verdicts: Vec<VerdictInput> = body
+        .verdicts
+        .into_iter()
+        .map(|v| VerdictInput {
+            dispute_id: v.dispute_id,
+            verdict: v.verdict,
+            resolution: v.resolution,
+            note: v.note,
+        })
+        .collect();
+    let updated = orchestrator::submit_verdicts(&state, &auth, debate_id, verdicts).await?;
+    Ok(ApiResponse::success(json!({ "debate": updated })))
+}
+
+/// `DELETE /ai/debates/{id}` — cancel a `running` debate. The orchestrator
+/// checks the row status before each round and bails; an in-flight engine
+/// turn finishes naturally (bounded by its own max_iterations).
+pub async fn cancel_debate(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<ApiResponse<serde_json::Value>> {
+    let debate_id = crate::types::snowflake_id::parse_id(&id)?;
+    let debate = debate_model::find_debate_by_id(&state.pool, debate_id, auth.tenant_id()).await?;
+    debate_access(&auth, &debate)?;
+    if debate.status != orchestrator::status::RUNNING {
+        return Err(AppError::BadRequest(format!(
+            "debate is {} — only running debates can be cancelled",
+            debate.status
+        )));
+    }
+    debate_model::set_debate_status(&state.pool, debate_id, auth.tenant_id(), "cancelled").await?;
+    Ok(ApiResponse::success(json!({ "cancelled": true })))
+}
+
+/// `GET /ai/debates/{id}/events` — SSE forwarding of `ai.debate.*` events
+/// for this debate (round-level progress; no token deltas by D-A9).
+pub async fn debate_events(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    let debate_id = crate::types::snowflake_id::parse_id(&id)?;
+    let debate = debate_model::find_debate_by_id(&state.pool, debate_id, auth.tenant_id()).await?;
+    debate_access(&auth, &debate)?;
+
+    let rx = state.eventbus.subscribe();
+    let stream = tokio_stream::StreamExt::filter_map(
+        tokio_stream::wrappers::BroadcastStream::new(rx),
+        move |result| match result {
+            Ok(arc_event) => match arc_event.as_ref() {
+                crate::event::Event::Custom {
+                    source: _,
+                    event_type,
+                    data,
+                } if event_type.starts_with("ai.debate.") => {
+                    let matches = data
+                        .get("debate_id")
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|v| v == debate_id.0);
+                    if matches {
+                        Some(Ok(SseEvent::default()
+                            .event(event_type.clone())
+                            .data(data.to_string())))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                tracing::warn!("debate SSE lagged, skipped {n} events");
+                None
+            }
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(30))
+            .text("ping"),
+    ))
+}
+
+/// `GET /ai/debates` — the current user's debates (most recent first).
+#[derive(Deserialize)]
+pub struct ListDebatesQuery {
+    pub status: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+pub async fn list_my_debates(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListDebatesQuery>,
+) -> AppResult<ApiResponse<serde_json::Value>> {
+    let owner = current_owner(&auth)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let (items, total) = debate_model::list_my_debates(
+        &state.pool,
+        auth.tenant_id(),
+        owner,
+        q.status.as_deref(),
+        page_size,
+        (page - 1) * page_size,
+    )
+    .await?;
+    Ok(ApiResponse::success(
+        json!({ "items": items, "total": total, "page": page, "page_size": page_size }),
+    ))
 }

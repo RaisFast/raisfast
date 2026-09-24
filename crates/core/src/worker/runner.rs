@@ -861,7 +861,10 @@ mod tests {
         batch: usize,
     ) -> Duration {
         let pool = crate::test_pool!();
-        sqlx::query("DELETE FROM jobs").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
         let queue = Arc::new(DefaultJobQueue::new(pool.clone()));
         let mut registry = JobHandlerRegistry::new();
         registry.register("bench_io", Box::new(BenchIo { delay }));
@@ -914,8 +917,7 @@ mod tests {
     async fn bench_worker_overhead() {
         for batch in [20usize, 1] {
             for concurrency in [2usize, 8, 32] {
-                let _ = bench_scenario(Duration::from_millis(1), 500, concurrency, batch)
-                    .await;
+                let _ = bench_scenario(Duration::from_millis(1), 500, concurrency, batch).await;
             }
         }
     }
@@ -950,13 +952,9 @@ mod tests {
         for delay_ms in [1u64, 100] {
             for batch in [1usize, 2, 5, 20] {
                 for concurrency in [8usize, 32] {
-                    let _ = bench_scenario(
-                        Duration::from_millis(delay_ms),
-                        200,
-                        concurrency,
-                        batch,
-                    )
-                    .await;
+                    let _ =
+                        bench_scenario(Duration::from_millis(delay_ms), 200, concurrency, batch)
+                            .await;
                 }
             }
         }

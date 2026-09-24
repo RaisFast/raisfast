@@ -652,10 +652,56 @@ pub struct AiConfig {
     /// false); runs one extraction LLM call per fold.
     #[serde(default)]
     pub memory_consolidate: bool,
+    /// Multi-agent debate orchestration (dev-docs/agent/multi-agent.md §14).
+    #[serde(default)]
+    pub debate: DebateConfig,
 }
 
 fn default_ai_timeout_secs() -> u64 {
     120
+}
+
+/// Debate orchestration knobs (multi-agent §9 governor + §14 config).
+///
+/// | Env | Type | Default | Description |
+/// |-----|------|---------|-------------|
+/// | `RAISFAST_AI_DEBATE_ENABLED` | bool | `false` | Master switch for the debate subsystem |
+/// | `RAISFAST_AI_DEBATE_MAX_ROUNDS` | u32 | `3` | Max orchestration rounds (clamped 1..=5) |
+/// | `RAISFAST_AI_DEBATE_MAX_CONCURRENT` | u32 | `2` | Max `running` debates per tenant |
+/// | `RAISFAST_AI_DEBATE_MAX_TOTAL_TOKENS` | i64 | `0` | Debate token budget; `0` = unlimited; exceeded → escalate, never hard-fail |
+/// | `RAISFAST_AI_DEBATE_AUTO_RESOLVE_MINOR` | bool | `true` | Auto-close `minor` disputes via the default rule before each terminal check (§6.5) |
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebateConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_debate_max_rounds")]
+    pub max_rounds: u32,
+    #[serde(default = "default_debate_max_concurrent")]
+    pub max_concurrent: u32,
+    #[serde(default)]
+    pub max_total_tokens: i64,
+    #[serde(default = "default_true")]
+    pub auto_resolve_minor: bool,
+}
+
+fn default_debate_max_rounds() -> u32 {
+    3
+}
+
+fn default_debate_max_concurrent() -> u32 {
+    2
+}
+
+impl Default for DebateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_rounds: default_debate_max_rounds(),
+            max_concurrent: default_debate_max_concurrent(),
+            max_total_tokens: 0,
+            auto_resolve_minor: true,
+        }
+    }
 }
 
 impl Default for AiConfig {
@@ -672,6 +718,13 @@ impl Default for AiConfig {
             context_window_fallback: 0,
             context_output_reserve: 0,
             mcp_servers: Vec::new(),
+            debate: DebateConfig {
+                enabled: false,
+                max_rounds: default_debate_max_rounds(),
+                max_concurrent: default_debate_max_concurrent(),
+                max_total_tokens: 0,
+                auto_resolve_minor: true,
+            },
         }
     }
 }
@@ -728,6 +781,29 @@ impl AiConfig {
                 .filter(|v| !v.is_empty())
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_default(),
+            debate: DebateConfig {
+                enabled: env::var("RAISFAST_AI_DEBATE_ENABLED")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.debate.enabled),
+                max_rounds: env::var("RAISFAST_AI_DEBATE_MAX_ROUNDS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .map(|r: u32| r.clamp(1, 5))
+                    .unwrap_or(defaults.debate.max_rounds),
+                max_concurrent: env::var("RAISFAST_AI_DEBATE_MAX_CONCURRENT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.debate.max_concurrent),
+                max_total_tokens: env::var("RAISFAST_AI_DEBATE_MAX_TOTAL_TOKENS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.debate.max_total_tokens),
+                auto_resolve_minor: env::var("RAISFAST_AI_DEBATE_AUTO_RESOLVE_MINOR")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(defaults.debate.auto_resolve_minor),
+            },
         }
     }
 }

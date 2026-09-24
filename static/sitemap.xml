@@ -3,8 +3,4 @@
   <url>
     <loc>http://localhost:9898</loc>
   </url>
-  <url>
-    <loc>http://localhost:9898/posts/hello-world-0a4e</loc>
-    <lastmod>2026-06-05T19:13:50+00:00</lastmod>
-  </url>
 </urlset>

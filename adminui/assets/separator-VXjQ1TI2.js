@@ -1,0 +1,1 @@
+import{j as o}from"./vendor-react-j_G0Dyx0.js";import{aK as s,bm as e}from"./index-C-uFVPpg.js";function n({className:a,orientation:r="horizontal",...t}){return o.jsx(s,{"data-slot":"separator",orientation:r,className:e("shrink-0 bg-border data-horizontal:h-px data-horizontal:w-full data-vertical:w-px data-vertical:self-stretch",a),...t})}export{n as S};
