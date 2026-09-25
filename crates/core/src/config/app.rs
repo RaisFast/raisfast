@@ -652,7 +652,7 @@ pub struct AiConfig {
     /// false); runs one extraction LLM call per fold.
     #[serde(default)]
     pub memory_consolidate: bool,
-    /// Multi-agent debate orchestration (dev-docs/agent/multi-agent.md §14).
+    /// Multi-agent debate orchestration (dev-docs/agent/multi-agent-debate.md §14).
     #[serde(default)]
     pub debate: DebateConfig,
 }

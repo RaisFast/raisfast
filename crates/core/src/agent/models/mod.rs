@@ -9,7 +9,7 @@
 //! - `ai_memories.superseded_by IS NULL` is the live-row predicate.
 //! - `ai_debates.ledger` is the dispute-ledger JSON (multi-agent §6.4).
 //!
-//! See `dev-docs/agent/db-schema.md` and `dev-docs/agent/multi-agent.md`.
+//! See `dev-docs/agent/db-schema.md` and `dev-docs/agent/multi-agent-debate.md`.
 
 pub mod ai_agent;
 pub mod ai_debate;

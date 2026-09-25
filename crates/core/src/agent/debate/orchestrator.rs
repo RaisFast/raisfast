@@ -1,5 +1,5 @@
 //! Debate orchestrator: the deterministic state machine above the TurnEngine
-//! (multi-agent §6.5, `dev-docs/agent/multi-agent.md`).
+//! (multi-agent §6.5, `dev-docs/agent/multi-agent-debate.md`).
 //!
 //! - Rounds are full engine runs; the dispute ledger is the single source of
 //!   state and the only thing passed between rounds (bounded context).

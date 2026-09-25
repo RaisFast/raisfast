@@ -1,5 +1,5 @@
 #![cfg(feature = "db-postgres")]
-//! DB round-trip for the debate layer (`dev-docs/agent/multi-agent.md` M-A1).
+//! DB round-trip for the debate layer (`dev-docs/agent/multi-agent-debate.md` M-A1).
 //!
 //! No LLM involved — validates `ai_debates` crud + ledger JSON column and the
 //! child-session (`ai_sessions.parent_id`) isolation primitive on PostgreSQL.

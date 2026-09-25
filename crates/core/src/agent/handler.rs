@@ -1242,7 +1242,7 @@ fn done_event(outcome: &AgentTurnResult) -> SseEvent {
     SseEvent::default().event("done").data(data.to_string())
 }
 
-// ── Debates (multi-agent M-A4; dev-docs/agent/multi-agent.md §11) ──────
+// ── Debates (multi-agent M-A4; dev-docs/agent/multi-agent-debate.md §11) ──────
 
 use crate::agent::debate::orchestrator::{self, VerdictInput};
 use crate::agent::models::ai_debate as debate_model;

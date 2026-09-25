@@ -1,5 +1,5 @@
 //! Debate run model (`ai_debates`): one A/B review debate execution
-//! (multi-agent §6-§7, `dev-docs/agent/multi-agent.md`).
+//! (multi-agent §6-§7, `dev-docs/agent/multi-agent-debate.md`).
 //!
 //! The `ledger` JSON column is the single source of state for the debate
 //! (requirement items + disputes + rounds log); `status` is the coarse

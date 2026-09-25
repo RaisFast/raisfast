@@ -1,5 +1,5 @@
 //! Delegation primitive: run one full agent turn in a fresh child session
-//! (multi-agent §5, `dev-docs/agent/multi-agent.md`).
+//! (multi-agent §5, `dev-docs/agent/multi-agent-debate.md`).
 //!
 //! `[照抄 opencode tool/task.ts]` shape — new session per spawn, context
 //! isolation (child history = this input only), result contract = final

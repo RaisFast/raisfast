@@ -1,5 +1,5 @@
 //! Dispute ledger — the debate's single source of state
-//! (`dev-docs/agent/multi-agent.md` §6.4).
+//! (`dev-docs/agent/multi-agent-debate.md` §6.4).
 //!
 //! Rounds exchange the ledger snapshot, never the raw transcript, so per-round
 //! input stays bounded and termination/report projection is deterministic

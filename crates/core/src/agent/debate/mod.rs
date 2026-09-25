@@ -1,4 +1,4 @@
-//! Debate orchestration (multi-agent, `dev-docs/agent/multi-agent.md`).
+//! Debate orchestration (multi-agent, `dev-docs/agent/multi-agent-debate.md`).
 //!
 //! Deterministic host-side state machine above the TurnEngine: rounds are
 //! full engine runs (proposer/reviewer agents), the dispute ledger
