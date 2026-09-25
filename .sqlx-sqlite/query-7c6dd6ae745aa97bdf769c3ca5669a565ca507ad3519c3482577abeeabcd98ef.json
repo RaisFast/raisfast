@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ai_sessions (id, agent_id, user_id, parent_id, title, status, meta, last_seq, created_at, updated_at, last_active_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "7c6dd6ae745aa97bdf769c3ca5669a565ca507ad3519c3482577abeeabcd98ef"
+}

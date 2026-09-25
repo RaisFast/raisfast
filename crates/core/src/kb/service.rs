@@ -588,7 +588,9 @@ async fn process_document_inner(
                 return Err(AppError::BadRequest("document chunking cancelled".into()));
             }
             Err(crate::compute::ComputeError::Rejected(msg)) => {
-                return Err(AppError::BadRequest(format!("document chunking failed: {msg}")));
+                return Err(AppError::BadRequest(format!(
+                    "document chunking failed: {msg}"
+                )));
             }
             Err(crate::compute::ComputeError::Unavailable(e)) => {
                 tracing::warn!("chunk subprocess unavailable ({e}); falling back in-process");

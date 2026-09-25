@@ -28,6 +28,8 @@ pub mod content_type;
 pub mod db;
 pub mod llm;
 pub use db::DbDriver;
+pub mod cancellation;
+pub mod compute;
 pub mod docparse;
 pub mod dto;
 pub mod errors;
@@ -37,8 +39,6 @@ pub mod flows;
 pub mod graphql;
 pub mod handlers;
 pub mod integration;
-pub mod cancellation;
-pub mod compute;
 pub mod kb;
 #[cfg(feature = "mcp")]
 pub mod mcp;

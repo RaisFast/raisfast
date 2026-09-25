@@ -1560,6 +1560,7 @@ CREATE TABLE IF NOT EXISTS ai_sessions (
     tenant_id TEXT NOT NULL DEFAULT 'default',
     agent_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
+    parent_id INTEGER,
     title TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'open',
     meta TEXT,
@@ -1612,6 +1613,30 @@ CREATE TABLE IF NOT EXISTS ai_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_memories_agent_live ON ai_memories(agent_id, superseded_by);
 CREATE INDEX IF NOT EXISTS idx_ai_memories_agent_category ON ai_memories(agent_id, category);
+
+-- A/B review debate run (multi-agent §6-§7, dev-docs/agent/multi-agent.md).
+CREATE TABLE IF NOT EXISTS ai_debates (
+    id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    agent_a_id INTEGER NOT NULL,
+    agent_b_id INTEGER NOT NULL,
+    origin_session_id INTEGER,
+    requirement TEXT NOT NULL,
+    params TEXT,
+    ledger TEXT NOT NULL,
+    rounds_done INTEGER NOT NULL DEFAULT 0,
+    report TEXT,
+    usage_total TEXT,
+    error TEXT,
+    heartbeat_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_debates_tenant_status ON ai_debates(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_ai_debates_agent_a ON ai_debates(agent_a_id);
+CREATE INDEX IF NOT EXISTS idx_ai_debates_agent_b ON ai_debates(agent_b_id);
 
 -- ── Knowledge base (kb-technical-design §2) ─────────────────────────
 CREATE TABLE IF NOT EXISTS kb_knowledge_bases (
@@ -1988,6 +2013,9 @@ CREATE TABLE IF NOT EXISTS docparse_job_logs (
     duration_ms BIGINT,
     error TEXT,
     result_key TEXT,
+    billing_mode TEXT DEFAULT 'post',
+    price_charged BIGINT,
+    payment_status TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ
 );
@@ -2004,9 +2032,6 @@ CREATE TABLE IF NOT EXISTS docparse_engines (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (tenant_id, engine_name)
 );
-ALTER TABLE docparse_job_logs ADD COLUMN billing_mode TEXT DEFAULT 'post';
-ALTER TABLE docparse_job_logs ADD COLUMN price_charged BIGINT;
-ALTER TABLE docparse_job_logs ADD COLUMN payment_status TEXT;
 
 CREATE TABLE IF NOT EXISTS docparse_tokens (
     id BIGINT PRIMARY KEY,

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO \"ai_debates\" (\"id\", \"user_id\", \"status\", \"agent_a_id\", \"agent_b_id\", \"origin_session_id\", \"requirement\", \"params\", \"ledger\", \"rounds_done\", \"heartbeat_at\", \"created_at\", \"updated_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Jsonb",
+        "Jsonb",
+        "Int4",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67dd43a4e0b9bbf036d6282a82b554f87624f86516f92c72b90ea7a3a831c21a"
+}
