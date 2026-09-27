@@ -55,6 +55,9 @@ pub(crate) fn test_config() -> AppConfig {
     cfg.base_url = "http://localhost:9000".into();
     // Short app-bundle drain window so drain tests don't wait 60s.
     cfg.apps.drain_window_secs = 1;
+    // Debate orchestrator e2e flips this master switch; the subsystem is
+    // otherwise inert unless `start_debate` is called (multi-agent §14).
+    cfg.ai.debate.enabled = true;
     let mut key_bytes = [0u8; 32];
     getrandom::fill(&mut key_bytes).unwrap();
     cfg.app_key = Some(base64::Engine::encode(
@@ -889,6 +892,8 @@ pub(crate) async fn create_published_post(app: &mut axum::Router, token: &str) -
     body["data"]["slug"].as_str().unwrap().to_string()
 }
 
+#[path = "api/ai_debate_e2e.rs"]
+mod ai_debate_e2e;
 #[path = "api/api_token.rs"]
 mod api_token;
 #[path = "api/apps.rs"]

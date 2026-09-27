@@ -5,6 +5,7 @@
 //! Full design: `dev-docs/agent/`.
 
 pub mod context;
+pub mod debate;
 pub mod handler;
 pub mod memory_sql;
 pub mod models;

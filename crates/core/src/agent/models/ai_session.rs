@@ -16,6 +16,9 @@ pub struct AiSession {
     pub tenant_id: Option<String>,
     pub agent_id: SnowflakeId,
     pub user_id: SnowflakeId,
+    /// Debate/parent session this was spawned from (`NULL` = top-level;
+    /// multi-agent §5). Depth governor reads it via the parent chain.
+    pub parent_id: Option<SnowflakeId>,
     pub title: String,
     pub status: String,
     pub meta: Option<serde_json::Value>,
@@ -55,6 +58,41 @@ pub async fn create_session(
     find_session_by_id(pool, id, tenant_id).await
 }
 
+/// Create a child session bound to a parent (debate subagent turn,
+/// multi-agent §5). `meta` carries `{debate_id, role}` for audit.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_child_session(
+    pool: &crate::db::Pool,
+    tenant_id: Option<&str>,
+    agent_id: SnowflakeId,
+    user_id: SnowflakeId,
+    parent_id: SnowflakeId,
+    title: &str,
+    meta: serde_json::Value,
+) -> AppResult<AiSession> {
+    let id = crate::utils::id::new_snowflake_id();
+    let now = now_utc();
+    raisfast_derive::crud_insert!(
+        pool,
+        "ai_sessions",
+        [
+            "id" => id,
+            "agent_id" => agent_id,
+            "user_id" => user_id,
+            "parent_id" => parent_id,
+            "title" => title,
+            "status" => "open",
+            "meta" => meta,
+            "last_seq" => 0i64,
+            "created_at" => &now,
+            "updated_at" => &now,
+            "last_active_at" => &now
+        ],
+        tenant: tenant_id
+    )?;
+    find_session_by_id(pool, id, tenant_id).await
+}
+
 /// Find a session by id (tenant-scoped).
 pub async fn find_session_by_id(
     pool: &crate::db::Pool,
@@ -78,7 +116,7 @@ pub async fn list_sessions(
     agent_id: SnowflakeId,
 ) -> AppResult<Vec<AiSession>> {
     let sql = format!(
-        "SELECT id, tenant_id, agent_id, user_id, title, status, meta, last_seq, \
+        "SELECT id, tenant_id, agent_id, user_id, parent_id, title, status, meta, last_seq, \
          created_at, updated_at, last_active_at FROM ai_sessions \
          WHERE agent_id = {}{} ORDER BY last_active_at DESC",
         crate::db::Driver::ph(1),
@@ -212,7 +250,7 @@ pub async fn admin_list_sessions(
     let total = q.fetch_one(pool).await?;
 
     let list_sql = format!(
-        "SELECT id, tenant_id, agent_id, user_id, title, status, meta, last_seq, \
+        "SELECT id, tenant_id, agent_id, user_id, parent_id, title, status, meta, last_seq, \
          created_at, updated_at, last_active_at FROM ai_sessions{where_clause} \
          ORDER BY last_active_at DESC LIMIT {} OFFSET {}",
         crate::db::Driver::ph(n),

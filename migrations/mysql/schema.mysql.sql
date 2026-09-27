@@ -1499,6 +1499,7 @@ CREATE TABLE IF NOT EXISTS ai_sessions (
     tenant_id VARCHAR(36) NOT NULL DEFAULT 'default',
     agent_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
+    parent_id BIGINT NULL,
     title VARCHAR(500) NOT NULL DEFAULT '',
     status VARCHAR(32) NOT NULL DEFAULT 'open',
     meta JSON NULL,
@@ -1550,6 +1551,30 @@ CREATE TABLE IF NOT EXISTS ai_memories (
     UNIQUE (tenant_id, agent_id, user_id, mem_key),
     INDEX idx_ai_memories_agent_live (agent_id, superseded_by),
     INDEX idx_ai_memories_agent_category (agent_id, category)
+);
+
+-- A/B review debate run (multi-agent §6-§7, dev-docs/agent/multi-agent.md).
+CREATE TABLE IF NOT EXISTS ai_debates (
+    id BIGINT PRIMARY KEY,
+    tenant_id VARCHAR(36) NOT NULL DEFAULT 'default',
+    user_id BIGINT NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'running',
+    agent_a_id BIGINT NOT NULL,
+    agent_b_id BIGINT NOT NULL,
+    origin_session_id BIGINT NULL,
+    requirement TEXT NOT NULL,
+    params JSON NULL,
+    ledger JSON NOT NULL,
+    rounds_done INT NOT NULL DEFAULT 0,
+    report TEXT NULL,
+    usage_total JSON NULL,
+    error TEXT NULL,
+    heartbeat_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_ai_debates_tenant_status (tenant_id, status),
+    INDEX idx_ai_debates_agent_a (agent_a_id),
+    INDEX idx_ai_debates_agent_b (agent_b_id)
 );
 
 -- ── Knowledge base (kb-technical-design §2) ─────────────────────────

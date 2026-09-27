@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ai_debates (id, user_id, status, agent_a_id, agent_b_id, origin_session_id, requirement, params, ledger, rounds_done, heartbeat_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": []
+  },
+  "hash": "b5b0ba90d831bbbea0c34a368e999e7aaa26df5fed9684abc8807d864c44ff91"
+}
